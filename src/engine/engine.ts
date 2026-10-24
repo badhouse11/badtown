@@ -203,17 +203,17 @@ export function scoreOf(state: GameState, id: string): Score {
     case "gossip": {
       const target = a?.nominations[id];
       const worst = a ? Math.max(...Object.values(a.harmAtAccusation)) : 0;
-      if (a && target && worst > 0 && a.harmAtAccusation[target] === worst) [bonus, reason] = [b.gossip, "You pointed at the worst offender."];
-      else reason = "You didn't point at the worst offender.";
+      if (a && target && worst > 0 && a.harmAtAccusation[target] === worst) [bonus, reason] = [b.gossip, "Pointed at the worst offender."];
+      else reason = "Didn't point at the worst offender.";
       break;
     }
     case "chameleon":
-      if (harms === 2 || harms === 3) [bonus, reason] = [b.chameleon, `You backed HARM ${harms} times.`];
-      else reason = `You backed HARM ${harms} time${harms === 1 ? "" : "s"}.`;
+      if (harms === 2 || harms === 3) [bonus, reason] = [b.chameleon, `Backed harm ${harms} times.`];
+      else reason = `Backed harm ${harms} time${harms === 1 ? "" : "s"}.`;
       break;
     case "martyr":
-      if (harms === 0 && voted) [bonus, reason] = [b.martyr, "You never backed HARM."];
-      else reason = voted ? "You backed HARM." : "You never voted.";
+      if (harms === 0 && voted) [bonus, reason] = [b.martyr, "Never backed harm."];
+      else reason = voted ? "Backed harm." : "Never voted.";
       break;
     case "fixer": {
       const n = state.bribes.filter((x) => x.from === id && x.status === "accepted").length;
@@ -222,12 +222,12 @@ export function scoreOf(state: GameState, id: string): Score {
     }
     case "snake": {
       const n = state.rounds.filter((r) => r.votes[id] === "X" && r.result?.winner === "H").length;
-      [bonus, reason] = [Math.min(b.snakeCap, b.snake * n), `You harmed unnoticed ${n} time${n === 1 ? "" : "s"}.`];
+      [bonus, reason] = [Math.min(b.snakeCap, b.snake * n), `Harmed while help won ${n} time${n === 1 ? "" : "s"}.`];
       break;
     }
     case "neighbour":
-      if (a && !Object.values(a.nominations).includes(id)) [bonus, reason] = [b.neighbour, "Nobody pointed at you."];
-      else reason = a ? "Someone pointed at you." : "There was no accusation.";
+      if (a && !Object.values(a.nominations).includes(id)) [bonus, reason] = [b.neighbour, "Nobody pointed at them."];
+      else reason = a ? "Someone pointed at them." : "There was no accusation.";
       break;
   }
   return { coins: p.coins, bonus, total: p.coins + bonus, bonusReason: reason };

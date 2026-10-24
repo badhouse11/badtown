@@ -1,35 +1,35 @@
-// GOOD NEIGHBOURS: functional placeholder client.
-// The phone only ever sends intentions ("I vote HELP"). The server decides everything and
+// Good Neighbours client. The phone only sends intentions; the server decides everything and
 // sends back this player's own filtered view.
 
-const $ = (sel) => document.querySelector(sel);
+import { icon } from "./icons.js";
+
+const $ = (s) => document.querySelector(s);
 const app = $("#app");
 const bar = $("#bar");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const signed = (n) => (n > 0 ? `+${n}` : `${n}`);
-const coins = (n) => `${n} coin${Math.abs(n) === 1 ? "" : "s"}`;
-const titleCase = (s) => (s ? s[0] + s.slice(1).toLowerCase() : "");
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-let session = null; // { code, playerId, token }
+const SEAT = ["#3d6be0", "#f3c843", "#e2582f", "#7e9c6b", "#a9884f", "#a698d8", "#b3b1ac", "#e7a3a0"];
+const AGENDA_COLOUR = { pillar: "#3d6be0", developer: "#b3b1ac", gossip: "#f3c843", chameleon: "#7e9c6b", martyr: "#a698d8", fixer: "#a9884f", snake: "#e2582f", neighbour: "#e7a3a0" };
+
+let session = null;
 let ws = null;
-let view = null; // { pub, me, reveal }
+let view = null;
 let clockOffset = 0;
 let retry = 0;
-let lastChatCount = 0;
+let lastChat = 0;
+let timerSpan = { deadline: null, total: 1 };
+let reveal = { key: null, shown: 0, timers: [] };
+let bribeDraft = { to: null, side: "X" };
+let bribeOpen = false;
 
 // ---------------------------------------------------------------------------------------
-// Sessions are stored per room code so a refresh or a dropped connection rejoins your seat.
+// Session storage: one seat per room per browser.
 
 const store = {
-  get: (code) => {
-    try { return JSON.parse(localStorage.getItem(`gn:${code}`)); } catch { return null; }
-  },
-  set: (code, v) => {
-    try { localStorage.setItem(`gn:${code}`, JSON.stringify(v)); } catch { /* private mode */ }
-  },
-  clear: (code) => {
-    try { localStorage.removeItem(`gn:${code}`); } catch { /* ignore */ }
-  },
+  get: (c) => { try { return JSON.parse(localStorage.getItem(`gn:${c}`)); } catch { return null; } },
+  set: (c, v) => { try { localStorage.setItem(`gn:${c}`, JSON.stringify(v)); } catch {} },
+  clear: (c) => { try { localStorage.removeItem(`gn:${c}`); } catch {} },
 };
 
 function toast(msg) {
@@ -37,13 +37,13 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove("show"), 3200);
+  toast.t = setTimeout(() => t.classList.remove("show"), 3000);
 }
 
 async function api(path, body) {
   const res = await fetch(path, { method: body ? "POST" : "GET", headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  if (!res.ok) throw new Error(data.error || "Something went wrong. Try again.");
   return data;
 }
 
@@ -53,426 +53,403 @@ async function api(path, body) {
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/api/rooms/${session.code}/ws`);
-  ws.onopen = () => {
-    retry = 0;
-    ws.send(JSON.stringify({ type: "HELLO", token: session.token }));
-  };
+  ws.onopen = () => { retry = 0; ws.send(JSON.stringify({ type: "HELLO", token: session.token })); };
   ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === "STATE") {
-      clockOffset = msg.serverNow - Date.now();
-      view = msg;
-      render();
-    } else if (msg.type === "ACK" && !msg.ok) {
-      toast(msg.error);
-    } else if (msg.type === "AUTH_FAILED") {
+    const m = JSON.parse(e.data);
+    if (m.type === "STATE") { clockOffset = m.serverNow - Date.now(); view = m; render(); }
+    else if (m.type === "ACK" && !m.ok) toast(m.error);
+    else if (m.type === "ERROR") toast(m.error);
+    else if (m.type === "AUTH_FAILED") {
       store.clear(session.code);
-      toast(msg.error);
       session = null;
       ws.onclose = null;
       ws.close();
-      renderHome(location.hash.slice(2));
-    } else if (msg.type === "ERROR") {
-      toast(msg.error);
+      toast("That seat has gone. Join again.");
+      home(location.hash.slice(2));
     }
   };
   ws.onclose = () => {
     if (!session) return;
-    const wait = Math.min(8000, 500 * 2 ** retry++);
-    bar.dataset.offline = "1";
-    setTimeout(() => session && connect(), wait);
+    setTimeout(() => session && connect(), Math.min(8000, 400 * 2 ** retry++));
   };
 }
 
 function send(cmd) {
-  if (!ws || ws.readyState !== 1) return toast("Reconnecting… try again in a second.");
+  if (!ws || ws.readyState !== 1) return toast("Reconnecting. Try again in a second.");
   ws.send(JSON.stringify({ type: "CMD", cid: crypto.randomUUID(), cmd }));
 }
-window.gn = { send }; // handy in the console during testing
 
 // ---------------------------------------------------------------------------------------
-// Home: create or join
+// Bits
 
-function renderHome(prefill = "") {
+const P = (id) => view.pub.players.find((p) => p.id === id);
+const seatColour = (id) => SEAT[Math.max(0, view.pub.players.findIndex((p) => p.id === id)) % SEAT.length];
+const initial = (name) => esc([...String(name).trim()][0]?.toUpperCase() ?? "?");
+const person = (id, size = "sm") => { const p = P(id); return `<span class="disc ${size} letter" style="--c:${seatColour(id)}">${initial(p?.name)}</span>`; };
+const nameOf = (id) => (id === view.me.id ? "You" : esc(P(id)?.name ?? "?"));
+const disc = (name, colour, size = "") => `<span class="disc ${size}" style="--c:${colour}">${icon(name)}</span>`;
+const others = () => view.pub.players.filter((p) => p.id !== view.me.id);
+
+function moveOn(label) {
+  const { pub, me } = view;
+  const done = pub.players.find((p) => p.id === me.id)?.movedOn;
+  const n = pub.players.filter((p) => p.movedOn).length;
+  const live = pub.players.filter((p) => p.connected).length;
+  return `<button class="btn wide" data-cmd='{"type":"READY_NEXT"}' ${done ? "disabled" : ""}>${done ? "Waiting for the others" : label}</button>
+    <p class="small soft" style="text-align:center;margin-top:8px">${n} of ${live} ready</p>`;
+}
+
+// ---------------------------------------------------------------------------------------
+// Home
+
+function home(prefill = "") {
   bar.hidden = true;
   $("#chat").hidden = true;
   app.innerHTML = `
-    <h1>Good Neighbours</h1>
-    <p class="muted">Prototype. Four to eight players, one phone each.</p>
-    <div class="panel">
-      <h2>Start a new town</h2>
-      <form id="create">
-        <label for="cname">Your name</label>
-        <input id="cname" maxlength="20" required autocomplete="nickname">
-        <p><button>Create room</button></p>
-      </form>
+    <div class="stack" style="padding-top:28px">
+      <div class="row" style="gap:8px">${disc("house", "var(--sun)", "sm")}${disc("help", "var(--help)", "sm")}${disc("harm", "var(--harm)", "sm")}${disc("eye", "var(--ochre)", "sm")}</div>
+      <h1 class="display">Good<br>Neighbours</h1>
+      <p style="font-size:20px">Help your town, or help yourself. Everyone has a secret. If the town falls, everyone loses.</p>
+      <p class="soft">3 to 8 players, one phone each, about 15 minutes.</p>
     </div>
-    <div class="panel">
+    <hr class="rule">
+    <form id="create" class="stack">
+      <h2>Start a town</h2>
+      <div><label class="field" for="cname">Your name</label><input id="cname" maxlength="16" required autocomplete="nickname"></div>
+      <button class="btn wide">Start a town</button>
+    </form>
+    <hr class="rule">
+    <form id="join" class="stack">
       <h2>Join a town</h2>
-      <form id="join">
-        <label for="jcode">Room code</label>
-        <input id="jcode" maxlength="6" required value="${esc(prefill)}" autocapitalize="characters" style="text-transform:uppercase">
-        <label for="jname">Your name</label>
-        <input id="jname" maxlength="20" required autocomplete="nickname">
-        <p><button>Join</button></p>
-      </form>
-    </div>`;
+      <div><label class="field" for="jcode">Town code</label><input id="jcode" maxlength="6" required value="${esc(prefill)}" autocapitalize="characters" style="text-transform:uppercase;letter-spacing:.12em"></div>
+      <div><label class="field" for="jname">Your name</label><input id="jname" maxlength="16" required autocomplete="nickname"></div>
+      <button class="btn wide ghost">Join</button>
+    </form>`;
   $("#create").onsubmit = async (e) => {
     e.preventDefault();
-    try {
-      const { code } = await api("/api/rooms", {});
-      await joinRoom(code, $("#cname").value);
-    } catch (err) { toast(err.message); }
+    try { const { code } = await api("/api/rooms", {}); await join(code, $("#cname").value); } catch (err) { toast(err.message); }
   };
   $("#join").onsubmit = async (e) => {
     e.preventDefault();
-    try { await joinRoom($("#jcode").value.trim().toUpperCase(), $("#jname").value); } catch (err) { toast(err.message); }
+    try { await join($("#jcode").value.trim().toUpperCase(), $("#jname").value); } catch (err) { toast(err.message); }
   };
 }
 
-async function joinRoom(code, name) {
-  const data = await api(`/api/rooms/${code}/join`, { name });
-  session = { code, playerId: data.playerId, token: data.token };
+async function join(code, name) {
+  const d = await api(`/api/rooms/${code}/join`, { name });
+  session = { code, playerId: d.playerId, token: d.token };
   store.set(code, session);
   location.hash = `#/${code}`;
   connect();
 }
 
 // ---------------------------------------------------------------------------------------
-// Game rendering
-
-const P = (id) => view.pub.players.find((p) => p.id === id);
-const who = (id) => {
-  const p = P(id);
-  if (!p) return "?";
-  const me = id === view.me.id ? " (you)" : "";
-  return `${esc(p.name)}${p.profession ? ` the ${titleCase(p.profession)}` : ""}${me}`;
-};
-const fill = (text, card) => esc(text).replaceAll("{P}", `<b>${who(card.primary)}</b>`).replaceAll("{S}", `<b>${who(card.secondary)}</b>`);
-const others = () => view.pub.players.filter((p) => p.id !== view.me.id);
-const options = (list, blank) => (blank ? `<option value="">${blank}</option>` : "") + list.map((p) => `<option value="${p.id}">${esc(p.name)}${p.profession ? ` (${titleCase(p.profession)})` : ""}</option>`).join("");
+// Frame
 
 function render() {
-  // Keep anything the player is halfway through typing or choosing.
   const kept = {};
-  app.querySelectorAll("input[id], select[id]").forEach((el) => (kept[el.id] = el.value));
+  app.querySelectorAll("input[id]").forEach((el) => (kept[el.id] = el.value));
   const focused = document.activeElement?.id;
-
-  const { pub, me } = view;
-  if (!me) {
+  if (!view.me) {
     store.clear(session.code);
     session = null;
-    return renderHome();
+    return home();
   }
+  const screens = { LOBBY: lobby, AGENDA: agenda, TALK: talk, VOTE: vote, RESULT: result, GOSSIP: gossip, ACCUSE: accuse, VERDICT: verdict, END: end };
   renderBar();
   renderChat();
-  const phase = pub.phase;
-  const screens = { LOBBY: lobby, NEGOTIATE: negotiate, VOTE: vote, RECAP: recap, PLANT: plant, DISCUSS: discuss, NOMINATE: nominate, LOCKUP: lockup, REVEAL: reveal };
-  app.innerHTML = screens[phase]();
+  app.innerHTML = screens[view.pub.phase]();
   wire();
-
-  Object.entries(kept).forEach(([id, v]) => {
-    const el = document.getElementById(id);
-    if (!el || el.readOnly) return;
-    if (el.tagName === "INPUT" || [...el.options].some((o) => o.value === v)) el.value = v;
-  });
+  for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el) el.value = v; }
   if (focused) document.getElementById(focused)?.focus();
+  if (view.pub.phase === "RESULT") runReveal();
 }
 
 function renderBar() {
   const { pub, me } = view;
-  bar.hidden = false;
-  delete bar.dataset.offline;
-  const pros = pub.prosperity;
+  const inGame = !["LOBBY", "END"].includes(pub.phase);
+  bar.hidden = !inGame;
+  if (!inGame) return;
+  if (pub.deadline !== timerSpan.deadline) timerSpan = { deadline: pub.deadline, total: Math.max(1, pub.deadline - (Date.now() + clockOffset)) };
+  const houses = Array.from({ length: pub.townMax }, (_, i) => icon("house").replace('class="ic"', `class="ic${i < pub.town ? " on" : ""}"`)).join("");
+  const a = me.agenda;
   bar.innerHTML = `
-    <span>Room <b>${esc(pub.code)}</b></span>
-    ${pub.phase !== "LOBBY" && pub.phase !== "REVEAL" ? `<span>Round <b>${pub.round}/${pub.rounds}</b></span>
-    <span>Prosperity <b>${pros}/${pub.maxProsperity}</b> <span class="meter" aria-hidden="true"><i style="width:${(pros / pub.maxProsperity) * 100}%"></i></span></span>
-    <span>Your coins <b>${me.wallet}</b></span>` : ""}
-    <span id="timer"></span>`;
-}
-
-function renderChat() {
-  $("#chat").hidden = false;
-  const log = view.pub.chat;
-  $("#chat-log").innerHTML = log.map((c) => `<li><b>${esc(c.name)}:</b> ${esc(c.text)}</li>`).join("");
-  $("#chat-count").textContent = log.length ? `(${log.length})` : "";
-  if (log.length !== lastChatCount) {
-    $("#chat-log").scrollTop = 1e9;
-    lastChatCount = log.length;
-  }
+    <div class="round">${pub.round || "–"}<span>/${pub.rounds}</span></div>
+    <div class="town ${pub.town <= 2 ? "danger" : ""}" role="img" aria-label="Town at ${pub.town} of ${pub.townMax}">${houses}</div>
+    <div class="timer" aria-hidden="${pub.deadline ? "false" : "true"}"><svg viewBox="0 0 44 44"><circle class="track" cx="22" cy="22" r="19"/><circle class="left" cx="22" cy="22" r="19" stroke-dasharray="119.4" stroke-dashoffset="0"/></svg><b></b></div>
+    <div class="purse" style="grid-column:1/-1">
+      <span class="row" style="gap:8px">${a ? `<span class="disc xs" style="--c:${AGENDA_COLOUR[a.key]}">${icon(a.key)}</span><span class="small"><b>${esc(a.name)}</b></span>` : ""}</span>
+      <span class="coins">${icon("coin")}<span class="num">${me.coins}</span></span>
+    </div>`;
+  tick();
 }
 
 function tick() {
-  const el = $("#timer");
-  if (!el || !view?.pub.deadline) return el && (el.textContent = "");
-  const left = Math.max(0, Math.ceil((view.pub.deadline - (Date.now() + clockOffset)) / 1000));
-  el.textContent = `${left}s`;
+  const ring = bar.querySelector(".timer .left");
+  const label = bar.querySelector(".timer b");
+  if (!ring) return;
+  if (!view?.pub.deadline) { ring.style.strokeDashoffset = 119.4; label.textContent = ""; return; }
+  const left = Math.max(0, view.pub.deadline - (Date.now() + clockOffset));
+  ring.style.strokeDashoffset = String(119.4 * (1 - left / timerSpan.total));
+  label.textContent = Math.ceil(left / 1000);
 }
 setInterval(tick, 250);
 
-function moveOnButton(label = "Continue") {
-  const { pub, me } = view;
-  const done = pub.players.find((p) => p.id === me.id)?.movedOn;
-  const n = pub.players.filter((p) => p.movedOn).length;
-  const live = pub.players.filter((p) => p.connected).length;
-  return `<p><button data-cmd='{"type":"READY_NEXT"}' ${done ? "disabled" : ""}>${done ? "Waiting for the others…" : label}</button>
-    <span class="muted small">${n}/${live} ready</span></p>`;
+function renderChat() {
+  $("#chat").hidden = false;
+  $("#chat-icon").innerHTML = icon("rumour");
+  const log = view.pub.chat;
+  $("#chat-log").innerHTML = log.map((c) => `<li><b>${esc(c.name)}</b> ${esc(c.text)}</li>`).join("");
+  $("#chat-count").textContent = log.length ? String(log.length) : "";
+  if (log.length !== lastChat) { $("#chat-log").scrollTop = 1e9; lastChat = log.length; }
 }
 
-function playerList(extra = () => "") {
-  return `<ul class="plain">${view.pub.players.map((p) => `<li><span>${who(p.id)}${p.isHost ? " · host" : ""}</span><span class="muted small">${p.connected ? "" : "offline "}${extra(p)}</span></li>`).join("")}</ul>`;
-}
-
-// ----- LOBBY
+// ---------------------------------------------------------------------------------------
+// Lobby
 
 function lobby() {
   const { pub, me } = view;
-  const mine = pub.players.find((p) => p.id === me.id);
+  const mine = P(me.id);
   const n = pub.players.length;
-  const allReady = pub.players.every((p) => p.ready);
+  const canStart = me.isHost && n >= pub.rules.minPlayers && pub.players.every((p) => p.ready);
   const link = `${location.origin}/#/${pub.code}`;
-  return `
-    <h1>Room ${esc(pub.code)}</h1>
-    <div class="panel">
-      <p>Share this code or link: <b>${esc(pub.code)}</b></p>
-      <p class="row"><input id="share" readonly value="${esc(link)}" style="flex:1"><button class="secondary" data-copy="${esc(link)}">Copy</button></p>
-    </div>
-    <h2>Residents (${n}/${pub.rules.maxPlayers})</h2>
-    ${playerList((p) => (p.ready ? "ready" : "not ready"))}
-    <p class="row">
-      <button data-cmd='${JSON.stringify({ type: "READY", ready: !mine.ready })}'>${mine.ready ? "Not ready" : "I'm ready"}</button>
-      ${me.isHost ? `<button data-cmd='{"type":"START"}' ${n >= pub.rules.minPlayers && allReady ? "" : "disabled"}>Start game</button>` : ""}
-      <button class="secondary" data-cmd='{"type":"LEAVE"}'>Leave</button>
-    </p>
-    ${me.isHost ? `<p class="muted small">You can start once ${pub.rules.minPlayers} to ${pub.rules.maxPlayers} players are in and everyone is ready.</p>` : ""}
-    ${rulesPanel()}`;
+  return `<div class="stack">
+    <p class="pill">Town code</p>
+    <h1 class="display" style="letter-spacing:.04em">${esc(pub.code)}</h1>
+    <div class="row"><button class="btn ghost" data-copy="${esc(link)}">Copy invite link</button></div>
+  </div>
+  <hr class="rule">
+  <div class="row between"><h2>Residents</h2><span class="soft num" style="font-size:22px;font-weight:800;font-stretch:70%">${n}/${pub.rules.maxPlayers}</span></div>
+  <ul class="people">${pub.players.map((p) => `<li class="${p.connected ? "" : "dot-off"}">${person(p.id)}<span class="grow">${esc(p.name)}${p.id === me.id ? " (you)" : ""}</span><span class="tag">${p.isHost ? "host · " : ""}${p.ready ? "ready" : "not ready"}</span></li>`).join("")}</ul>
+  <div class="stack" style="margin-top:22px">
+    <button class="btn wide ${mine.ready ? "ghost" : ""}" data-cmd='${JSON.stringify({ type: "READY", ready: !mine.ready })}'>${mine.ready ? "I'm not ready" : "I'm ready"}</button>
+    ${me.isHost ? `<button class="btn wide" data-cmd='{"type":"START"}' ${canStart ? "" : "disabled"}>Start the game</button>
+      <p class="small soft" style="text-align:center">${n < pub.rules.minPlayers ? `You need at least ${pub.rules.minPlayers} players.` : canStart ? "Everyone's ready." : "Waiting for everyone to be ready."}</p>` : `<p class="small soft" style="text-align:center">The host starts the game when everyone's ready.</p>`}
+  </div>
+  <hr class="rule">
+  ${howTo()}
+  <p style="margin-top:20px"><button class="btn ghost" data-cmd='{"type":"LEAVE"}'>Leave town</button></p>`;
 }
 
-function rulesPanel() {
+function howTo() {
   const r = view.pub.rules;
-  return `<details class="panel"><summary><b>How it works</b></summary>
-    <p>Each round a crisis hits town. Everyone secretly backs a side, HELP or HARM, staking ${coins(r.stake)}. The side with more backers wins and splits the losers' stakes.</p>
-    <p>Backing HARM pays you <b>${coins(r.skim)}</b> whether it wins or not. HELP wins push prosperity up and pay everyone a ${r.dividend}-coin dividend. HARM wins push it down.</p>
-    <p><b>If prosperity hits 0, the town collapses and everybody loses.</b> Otherwise the richest resident after the final round wins.</p>
-    <p>Ties go to HELP if prosperity is ${r.tieHelpAt} or more, otherwise HARM.</p>
-    <p>You can secretly bribe (${r.bribeMin} to ${r.bribeMax} coins, locks their vote) and lend (${r.loanSizes.join(" or ")} coins, repaid with ${r.loanInterest} interest at the end).</p>
-    <p>After round ${r.meetingAfterRound} the town meets. Everyone hears one rumour, then the town locks someone in the stocks for a round.</p>
-    <p>Nobody sees who did what until the very end.</p></details>`;
-}
-
-// ----- ROUND
-
-function cardPanel() {
-  const { pub } = view;
-  const c = pub.card;
-  const e = c.effects;
-  const line = (eff) => [eff.p ? `${who(c.primary)} ${signed(eff.p)}` : "", eff.s ? `${who(c.secondary)} ${signed(eff.s)}` : ""].filter(Boolean).join(", ") || "nobody personally";
-  return `<div class="panel">
-    <p class="muted small">Round ${pub.round} · ${titleCase(c.category)}</p>
-    <h2>${esc(c.title)}</h2>
-    <p>${fill(c.premise, c)}</p>
-    <div class="grid2">
-      <div><h3 class="good">HELP: ${esc(c.helpLabel)}</h3>
-        <p class="small">${fill(c.helpResult, c)}</p>
-        <p class="small">Prosperity +1, everyone gets a ${pub.rules.dividend}-coin dividend. Personal: ${line(e.help)}.</p></div>
-      <div><h3 class="bad">HARM: ${esc(c.harmLabel)}</h3>
-        <p class="small">${fill(c.harmResult, c)}</p>
-        <p class="small">Prosperity −1, no dividend. Personal: ${line(e.harm)}.</p></div>
-    </div>
-    <p class="muted small">Stake ${coins(pub.rules.stake)}. HARM backers skim ${coins(pub.rules.skim)} either way. Tie goes to ${pub.prosperity >= pub.rules.tieHelpAt ? "HELP" : "HARM"} at prosperity ${pub.prosperity}.</p>
+  const step = (ic, colour, text) => `<div class="row" style="align-items:flex-start">${disc(ic, colour, "sm")}<p style="margin:6px 0 0">${text}</p></div>`;
+  return `<h2>How to play</h2><div class="stack" style="margin-top:16px">
+    ${step("burst", "var(--sun)", "Each round a crisis hits the town. Talk it over.")}
+    ${step("help", "var(--help)", `Then everyone secretly backs HELP or HARM. If most help, the town grows and everyone gets ${plural(r.dividend, "coin")}.`)}
+    ${step("harm", "var(--harm)", `Backing HARM puts ${r.skim} coins in your pocket, whatever happens. If most harm, the town drops ${r.harmDrop}.`)}
+    ${step("ruin", "var(--stone)", "If the town hits zero, everybody loses.")}
+    ${step("eye", "var(--ochre)", "Everyone has a secret agenda worth bonus coins at the end.")}
+    ${step("bribe", "var(--moss)", `You can secretly bribe someone (${r.bribe} coins) to vote your way. If they accept, their vote is locked.`)}
+    ${step("point", "var(--lilac)", `After round ${r.accuseAfter}, everyone hears one true rumour. Then the town points at one person: their agenda is revealed and they sit out a round.`)}
+    ${step("crown", "var(--sun)", `Most coins after ${view.pub.rounds} rounds wins.`)}
   </div>`;
 }
 
-function stocksNotice() {
-  return view.me.inStocks ? `<div class="panel"><b>You're in the stocks this round.</b> No vote, no bribes, no dividend. You can still talk, lend and borrow.</div>` : "";
-}
+// ---------------------------------------------------------------------------------------
+// Agenda
 
-function negotiate() {
+function agenda() {
   const { pub, me } = view;
-  const incomingBribes = me.bribes.filter((b) => !b.mine);
-  const myBribe = me.bribes.find((b) => b.mine);
-  const loansIn = me.loans.filter((l) => l.current && l.borrower === me.id);
-  const myLoan = me.loans.find((l) => l.current && l.lender === me.id);
-  const targets = others().filter((p) => !p.inStocks);
-  const r = pub.rules;
-  const side = (s) => (s === "H" ? "HELP" : "HARM");
-  return `
-    ${cardPanel()}
-    ${stocksNotice()}
-    <h2>Negotiate</h2>
-    <p class="muted small">Talk it out. Everything below is private.</p>
-
-    ${incomingBribes.map((b) => `<div class="panel"><p><b>${esc(b.fromName)}</b> offers you <b>${coins(b.amount)}</b> to back <b>${side(b.side)}</b>. ${b.status === "pending" ? "" : `<i>(${b.status})</i>`}</p>
-      ${b.status === "pending" ? `<p class="row"><button data-cmd='${JSON.stringify({ type: "RESPOND_BRIBE", id: b.id, accept: true })}'>Take the money</button><button class="secondary" data-cmd='${JSON.stringify({ type: "RESPOND_BRIBE", id: b.id, accept: false })}'>Refuse</button></p>` : ""}</div>`).join("")}
-
-    ${loansIn.map((l) => `<div class="panel"><p><b>${esc(l.lenderName)}</b> offers you a loan of <b>${coins(l.amount)}</b> (you'll owe ${l.owed} at the end). ${l.status === "pending" ? "" : `<i>(${l.status})</i>`}</p>
-      ${l.status === "pending" ? `<p class="row"><button data-cmd='${JSON.stringify({ type: "RESPOND_LOAN", id: l.id, accept: true })}'>Accept</button><button class="secondary" data-cmd='${JSON.stringify({ type: "RESPOND_LOAN", id: l.id, accept: false })}'>Decline</button></p>` : ""}</div>`).join("")}
-
-    ${me.inStocks ? "" : `<details class="panel" ${myBribe ? "open" : ""}><summary><b>Offer a bribe</b></summary>
-      ${myBribe ? `<p>You offered <b>${esc(myBribe.toName)}</b> ${coins(myBribe.amount)} to back ${side(myBribe.side)}: <i>${myBribe.status}</i>.</p>` : `
-      <form data-form="bribe">
-        <label for="b-to">Who</label><select id="b-to" required>${options(targets, "Choose…")}</select>
-        <label for="b-side">To back</label><select id="b-side"><option value="H">HELP</option><option value="X">HARM</option></select>
-        <label for="b-amt">Coins</label><select id="b-amt">${Array.from({ length: r.bribeMax - r.bribeMin + 1 }, (_, i) => r.bribeMin + i).map((n) => `<option>${n}</option>`).join("")}</select>
-        <p><button>Send offer</button></p>
-        <p class="muted small">If they accept, the coins move straight away and their vote is locked.</p>
-      </form>`}</details>`}
-
-    <details class="panel" ${myLoan ? "open" : ""}><summary><b>Offer a loan</b></summary>
-      ${myLoan ? `<p>You offered <b>${esc(myLoan.borrowerName)}</b> a loan of ${coins(myLoan.amount)}: <i>${myLoan.status}</i>.</p>` : `
-      <form data-form="loan">
-        <label for="l-to">Who</label><select id="l-to" required>${options(others(), "Choose…")}</select>
-        <label for="l-amt">Coins</label><select id="l-amt">${r.loanSizes.map((n) => `<option>${n}</option>`).join("")}</select>
-        <p><button>Offer loan</button></p>
-        <p class="muted small">Repaid automatically at the end with ${r.loanInterest} interest, if they can afford it.</p>
-      </form>`}</details>
-
-    ${debtsPanel()}
-    ${moveOnButton("Done talking")}
-    ${historyPanel()}`;
+  const a = me.agenda;
+  return `<div class="secret stack">
+    <span class="disc xl" style="--c:${AGENDA_COLOUR[a.key]}">${icon(a.key)}</span>
+    <p class="soft">Your secret agenda</p>
+    <h2>${esc(a.name)}</h2>
+    <p style="font-size:20px">${esc(a.goal)}</p>
+    <p class="small soft">${icon("eye").replace('class="ic"', 'class="ic" style="width:16px;height:16px;vertical-align:-3px"')} Only you can see this.</p>
+  </div>
+  <h3 style="margin:26px 0 4px">The possible agendas</h3><p class="small soft" style="margin-bottom:8px">Everyone has one. Nobody shares yours. Not all of them are in this game.</p>
+  <ul class="people">${pub.agendas.map((x) => `<li><span class="disc sm" style="--c:${AGENDA_COLOUR[x.key]}">${icon(x.key)}</span><span class="grow">${esc(x.name)}<br><span class="small soft">${esc(x.goal)}</span></span></li>`).join("")}</ul>
+  <div style="margin-top:22px">${moveOn("Got it")}</div>`;
 }
 
-function debtsPanel() {
-  const { me } = view;
-  const owe = me.loans.filter((l) => l.status === "accepted" && l.borrower === me.id);
-  const owed = me.loans.filter((l) => l.status === "accepted" && l.lender === me.id);
-  if (!owe.length && !owed.length) return "";
-  return `<div class="panel small"><b>Your loans</b>
-    ${owe.map((l) => `<p>You owe ${esc(l.lenderName)} ${coins(l.owed)} at the end.</p>`).join("")}
-    ${owed.map((l) => `<p>${esc(l.borrowerName)} owes you ${coins(l.owed)} at the end.</p>`).join("")}</div>`;
+// ---------------------------------------------------------------------------------------
+// Round
+
+function crisis() {
+  const { card, rules } = view.pub;
+  return `<div class="hero">
+    <span class="disc xl" style="--c:var(--sun)">${icon(card.icon)}</span>
+    <h1>${esc(card.title)}</h1>
+    <p style="font-size:20px;margin:0">${esc(card.premise)}</p>
+  </div>
+  <div style="margin-top:20px">
+    <div class="choice">${disc("help", "var(--help)")}<div><h3>${esc(card.helpLabel)}</h3><p class="what">Help. If most help: town +${rules.helpUp}, everyone +${rules.dividend}.</p></div></div>
+    <div class="choice">${disc("harm", "var(--harm)")}<div><h3>${esc(card.harmLabel)}</h3><p class="what">Harm. You pocket ${rules.skim} coins either way. If most harm: town −${rules.harmDrop}.</p></div></div>
+  </div>`;
+}
+
+function sittingOutNote() {
+  return view.me.sittingOut ? `<div class="offer row">${disc("stocks", "var(--stone)", "sm")}<p style="margin:0"><b>You're in the stocks this round.</b> No vote, no bribes, no dividend. You can still talk.</p></div>` : "";
+}
+
+function talk() {
+  const { pub, me } = view;
+  const incoming = me.bribes.filter((b) => !b.mine);
+  const mine = me.bribes.find((b) => b.mine);
+  const side = (s) => (s === "H" ? "help" : "harm");
+  const targets = others().filter((p) => !p.sittingOut);
+  return `${crisis()}
+  <div class="stack" style="margin-top:22px">
+    ${sittingOutNote()}
+    ${incoming.map((b) => `<div class="offer stack">
+      <div class="row">${disc("bribe", "var(--moss)", "sm")}<p style="margin:0"><b>${esc(b.fromName)}</b> offers you ${pub.rules.bribe} coins to <b>${side(b.side)}</b>.</p></div>
+      ${b.status === "pending" ? `<div class="row"><button class="btn" data-cmd='${JSON.stringify({ type: "RESPOND_BRIBE", id: b.id, accept: true })}'>Take it</button><button class="btn ghost" data-cmd='${JSON.stringify({ type: "RESPOND_BRIBE", id: b.id, accept: false })}'>Refuse</button></div>` : `<p class="small soft" style="margin:0">You ${b.status === "accepted" ? "took it. Your vote is locked." : b.status}.</p>`}
+    </div>`).join("")}
+    ${me.sittingOut ? "" : mine ? `<div class="offer row">${disc("bribe", "var(--moss)", "sm")}<p style="margin:0">You offered <b>${esc(mine.toName)}</b> ${pub.rules.bribe} coins to ${side(mine.side)}. <span class="soft">${mine.status === "pending" ? "Waiting…" : mine.status === "accepted" ? "Accepted." : "Refused."}</span></p></div>`
+      : `<details class="fold offer" ${bribeOpen ? "open" : ""}><summary class="row between"><span class="row">${disc("bribe", "var(--moss)", "sm")}<b>Offer a bribe</b></span><span class="soft small">${pub.rules.bribe} coins</span></summary>
+        <div class="stack" style="margin-top:14px">
+          <div class="row" style="flex-wrap:wrap;gap:10px">${targets.map((p) => `<button class="target ${bribeDraft.to === p.id ? "chosen" : ""}" style="padding:6px 8px" data-bribe-to="${p.id}">${person(p.id)}<span class="small">${esc(p.name)}</span></button>`).join("")}</div>
+          <div class="seg" role="group" aria-label="Side"><button data-bribe-side="H" aria-pressed="${bribeDraft.side === "H"}">To help</button><button data-bribe-side="X" aria-pressed="${bribeDraft.side === "X"}">To harm</button></div>
+          <button class="btn wide" data-bribe-send ${bribeDraft.to && targets.some((t) => t.id === bribeDraft.to) && me.coins >= pub.rules.bribe ? "" : "disabled"}>Send secret offer</button>
+          ${me.coins < pub.rules.bribe ? `<p class="small soft">You need ${pub.rules.bribe} coins.</p>` : ""}
+        </div></details>`}
+    ${moveOn("Ready to vote")}
+  </div>`;
 }
 
 function vote() {
   const { pub, me } = view;
   const c = pub.card;
   let body;
-  if (me.inStocks) body = stocksNotice();
-  else if (me.broke) body = `<div class="panel"><b>You can't afford the stake this round.</b> You'll sit this one out. A loan or a dividend can get you back in.</div>`;
-  else if (me.lockedSide) body = `<div class="panel"><p>You took a deal. Your vote is locked to <b>${me.lockedSide === "H" ? "HELP" : "HARM"}</b>.</p></div>`;
-  else
-    body = `<div class="grid2">
-      <button class="big ${me.myVote === "H" ? "chosen" : ""}" data-cmd='{"type":"VOTE","side":"H"}'>HELP<br><span class="small">${esc(c.helpLabel)}</span></button>
-      <button class="big ${me.myVote === "X" ? "chosen" : ""}" data-cmd='{"type":"VOTE","side":"X"}'>HARM<br><span class="small">${esc(c.harmLabel)}</span></button>
+  if (me.sittingOut) body = sittingOutNote();
+  else if (me.lockedSide) body = `<div class="offer row">${disc(me.lockedSide === "H" ? "help" : "harm", me.lockedSide === "H" ? "var(--help)" : "var(--harm)", "sm")}<p style="margin:0">You took a bribe. Your vote is locked to <b>${me.lockedSide === "H" ? "help" : "harm"}</b>.</p></div>`;
+  else body = `<div class="votes">
+      <button class="vote ${me.myVote === "H" ? "chosen" : ""}" data-cmd='{"type":"VOTE","side":"H"}'>${disc("help", "var(--help)")}<span class="label">Help</span><span class="sub">${esc(c.helpLabel)}</span></button>
+      <button class="vote ${me.myVote === "X" ? "chosen" : ""}" data-cmd='{"type":"VOTE","side":"X"}'>${disc("harm", "var(--harm)")}<span class="label">Harm</span><span class="sub">${esc(c.harmLabel)} · +${pub.rules.skim} coins</span></button>
     </div>
-    <p class="muted small">${me.myVote ? `You're backing ${me.myVote === "H" ? "HELP" : "HARM"}. You can change your mind until the timer ends.` : `Nothing chosen yet. If the timer runs out you sit this round out.`}</p>`;
-  return `${cardPanel()}<h2>Secret vote</h2>${body}`;
+    <p class="small soft" style="text-align:center;margin-top:14px">${me.myVote ? "Locked in. You can change your mind until everyone's voted." : "Nobody will see your choice until the end."}</p>`;
+  return `<div class="stack">
+    <div class="row">${disc(c.icon, "var(--sun)", "sm")}<h3>${esc(c.title)}</h3></div>
+    <h1>Help or harm?</h1>
+    ${body}
+    <p class="small soft" style="text-align:center">${pub.votesIn ?? 0} of ${pub.players.filter((p) => !p.sittingOut).length} votes in</p>
+  </div>`;
 }
 
-function recap() {
+function result() {
   const { pub, me } = view;
-  const last = pub.history[pub.history.length - 1];
+  const r = pub.result;
   const c = pub.card;
-  const st = me.settlement;
-  let head;
-  if (!last || last.winner === null) head = `<h2>Nobody voted</h2><p>The crisis passes without a decision.</p>`;
-  else
-    head = `<h2>${last.winner === "H" ? `HELP wins` : `HARM wins`}</h2>
-      <p><b>HELP ${last.help} · HARM ${last.harm}</b>${last.tieBroken ? " (tie, decided by prosperity)" : ""}</p>
-      <p>${fill(last.winner === "H" ? c.helpResult : c.harmResult, c)}</p>
-      <p>Prosperity ${last.prosperityBefore} → <b>${last.prosperityAfter}</b></p>`;
-  const lines = st
-    ? [
-        st.stake ? `Stake −${st.stake}` : "",
-        st.payout ? `Winnings back +${st.payout}` : "",
-        st.skim ? `Skim +${st.skim}` : "",
-        st.dividend ? `Dividend +${st.dividend}` : "",
-        st.card ? `Event ${signed(st.card)}` : "",
-        st.shortfall ? `(${st.shortfall} more you couldn't pay)` : "",
-      ].filter(Boolean)
-    : [];
-  return `<div class="panel">${head}</div>
-    <div class="panel"><h3>Your round (private)</h3>
-      ${lines.length ? `<p>${lines.join(" · ")}</p><p><b>Net ${signed(st.net)}</b> · now ${coins(me.wallet)}</p>` : `<p>No change. You have ${coins(me.wallet)}.</p>`}</div>
-    ${moveOnButton()}
-    ${historyPanel()}`;
+  const headline = r.winner === "H" ? "The town is helped" : r.winner === "X" ? "Harm wins" : r.help + r.harm === 0 ? "Nobody voted" : "Deadlock";
+  const story = r.winner === "H" ? c.helpResult : r.winner === "X" ? c.harmResult : "Nobody could agree. Nothing changes.";
+  const g = me.gain;
+  const gains = [g?.skim ? `+${g.skim} skimmed` : "", g?.dividend ? `+${g.dividend} town dividend` : ""].filter(Boolean).join(", ");
+  const delta = r.townAfter - r.townBefore;
+  return `<div class="stack">
+    <div class="row">${disc(c.icon, "var(--sun)", "sm")}<h3>${esc(c.title)}</h3></div>
+    <div class="flips" aria-label="${r.help} helped, ${r.harm} harmed">${r.flips.map((f) => `<div class="flip"><div class="inner"><div class="face back"></div><div class="face front" style="background:${f === "H" ? "var(--help)" : "var(--harm)"}">${icon(f === "H" ? "help" : "harm")}</div></div></div>`).join("")}</div>
+    <div class="after stack">
+      <p class="num" style="font-size:22px;font-weight:800;font-stretch:70%;margin:0">${r.help} helped · ${r.harm} harmed</p>
+      <h1>${headline}</h1>
+      <p style="font-size:20px">${esc(story)}</p>
+      <div class="row">${disc("house", "var(--sun)", "sm")}<p style="margin:0">Town ${r.townBefore} → <b>${r.townAfter}</b>${delta ? ` (${delta > 0 ? "+" : ""}${delta})` : ""}${r.townAfter <= 0 ? ". <b>The town has collapsed.</b>" : r.townAfter <= 2 ? ". <b>One more bad round could finish it.</b>" : ""}</p></div>
+      <div class="row">${disc("coin", "var(--ochre)", "sm")}<p style="margin:0">${gains ? `You: ${gains}.` : "You gained nothing this round."} <span class="soft">Only you see this.</span></p></div>
+      ${moveOn(r.townAfter <= 0 ? "See the wreckage" : "Next")}
+    </div>
+  </div>`;
 }
 
-function historyPanel() {
-  const h = view.pub.history;
-  if (!h.length) return "";
-  return `<details class="panel small"><summary>Town record</summary><ul class="plain">${h
-    .map((r) => `<li><span>${r.round}. ${esc(r.title)}</span><span>${r.winner === null ? "no vote" : `${r.winner === "H" ? "HELP" : "HARM"} ${r.help}–${r.harm}`} · ${r.prosperityBefore}→${r.prosperityAfter}</span></li>`)
-    .join("")}</ul></details>`;
+function runReveal() {
+  const r = view.pub.result;
+  const key = `${view.pub.gameNo}:${view.pub.round}`;
+  const flips = [...app.querySelectorAll(".flip")];
+  const after = app.querySelector(".after");
+  const instant = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reveal.key !== key) {
+    reveal.timers.forEach(clearTimeout);
+    reveal = { key, shown: instant ? r.flips.length : 0, timers: [] };
+    for (let i = 0; i < r.flips.length; i++) {
+      reveal.timers.push(setTimeout(() => {
+        reveal.shown = i + 1;
+        app.querySelectorAll(".flip")[i]?.classList.add("on");
+        if (reveal.shown === r.flips.length) setTimeout(() => app.querySelector(".after")?.classList.add("show"), 450);
+      }, 700 + i * 650));
+    }
+    if (r.flips.length === 0) reveal.timers.push(setTimeout(() => app.querySelector(".after")?.classList.add("show"), 300));
+  }
+  flips.slice(0, reveal.shown).forEach((f) => f.classList.add("on"));
+  if (reveal.shown >= r.flips.length && (instant || reveal.shown > 0 || r.flips.length === 0)) after?.classList.add("show");
 }
 
-// ----- TOWN MEETING
+// ---------------------------------------------------------------------------------------
+// The accusation
 
-function plant() {
-  const { pub, me } = view;
-  const r = pub.rules;
-  return `<h1>Town Meeting</h1>
-    <div class="panel"><p>The town gathers. Before the gossip starts, anyone who has backed HARM may pay ${coins(r.plantCost)} to plant a fake rumour about someone. A planted rumour replaces somebody's real one and looks exactly the same.</p>
-    <p class="muted small">Everyone sees this screen, whether or not they can plant.</p></div>
-    ${me.canPlant ? `<div class="panel"><h3>Plant a rumour (private)</h3><form data-form="plant">
-      <label for="pl-to">About</label><select id="pl-to" required>${options(others(), "Choose…")}</select>
-      <label for="pl-n">Times they backed HARM (rounds 1–${pub.meeting.afterRound})</label><select id="pl-n">${Array.from({ length: pub.meeting.afterRound + 1 }, (_, i) => `<option>${i}</option>`).join("")}</select>
-      <p><button>Plant it (${coins(r.plantCost)})</button></p></form></div>` : ""}
-    ${me.myPlant ? `<div class="panel">You planted: <b>${who(me.myPlant.target)}</b> backed HARM ${me.myPlant.count} times.</div>` : ""}
-    ${moveOnButton()}`;
+function gossip() {
+  const { me } = view;
+  const r = me.rumour;
+  return `<div class="stack">
+    <span class="disc xl" style="--c:var(--lilac)">${icon("rumour")}</span>
+    <p class="pill">The grapevine</p>
+    <h1>${nameOf(r.subject)} backed harm ${plural(r.count, "time")}.</h1>
+    <p style="font-size:20px">It's true. Everyone heard one rumour about someone else. Share it, keep it, or bend it.</p>
+    <p class="soft">Next, the town points at one person. Their secret agenda is revealed and they sit out round ${view.pub.accusation.afterRound + 1}.</p>
+    ${moveOn("Ready to point")}
+  </div>`;
 }
 
-function rumourPanel() {
-  const r = view.me.rumour;
-  if (!r) return "";
-  return `<div class="panel"><h3>The rumour you heard (private)</h3>
-    <p><b>${who(r.subject)}</b> backed HARM <b>${r.count}</b> time${r.count === 1 ? "" : "s"} in rounds 1–${view.pub.meeting.afterRound}.</p>
-    <p class="muted small">It might be true. It might have been planted. Share it, keep it, or twist it.</p></div>`;
-}
-
-function discuss() {
-  return `<h1>Town Meeting</h1>${rumourPanel()}<p>Talk it through. Next, everyone secretly nominates one resident for the stocks.</p>${moveOnButton("Ready to nominate")}`;
-}
-
-function nominate() {
+function accuse() {
   const { pub, me } = view;
   const chosen = me.myNomination;
-  return `<h1>Town Meeting</h1>${rumourPanel()}
-    <h2>Who goes in the stocks?</h2>
-    <p class="muted small">Most nominations goes in for round ${pub.meeting.afterRound + 1}: no vote, no skim, no dividend. If they were skimming, they quietly pay a fine. If they weren't, they get compensation. Only they find out which.</p>
-    <div class="grid2">${others().map((p) => `<button class="${chosen === p.id ? "chosen" : "secondary"}" data-cmd='${JSON.stringify({ type: "NOMINATE", target: p.id })}'>${esc(p.name)}</button>`).join("")}
-    <button class="${chosen === null ? "chosen" : "secondary"}" data-cmd='{"type":"NOMINATE","target":null}'>Nobody</button></div>
-    <p class="muted small">${chosen !== undefined ? "Nomination in. You can change it until everyone's done." : ""} ${pub.meeting.nominationsIn}/${pub.players.length} in.</p>`;
+  const r = me.rumour;
+  return `<div class="stack">
+    <h1>Who do you point at?</h1>
+    <p class="soft">Your rumour: ${nameOf(r.subject)} backed harm ${plural(r.count, "time")}.</p>
+    <div class="targets">${others().map((p) => `<button class="target ${chosen === p.id ? "chosen" : ""}" data-cmd='${JSON.stringify({ type: "NOMINATE", target: p.id })}'>${person(p.id, "")}<span>${esc(p.name)}</span></button>`).join("")}
+      <button class="target ${chosen === null ? "chosen" : ""}" data-cmd='{"type":"NOMINATE","target":null}'><span class="disc hollow" style="width:72px"></span><span>Nobody</span></button></div>
+    <p class="small soft" style="text-align:center">${pub.accusation.nominationsIn} of ${pub.players.length} have pointed. ${chosen !== undefined ? "You can change your mind until everyone's in." : ""}</p>
+  </div>`;
 }
 
-function lockup() {
+function verdict() {
   const { pub, me } = view;
-  const m = pub.meeting;
-  const a = me.audit;
-  return `<h1>Town Meeting</h1>
-    <div class="panel">${m.lockedUp ? `<h2>${who(m.lockedUp)} goes in the stocks</h2><p>${m.nominationsAgainst} nomination${m.nominationsAgainst === 1 ? "" : "s"}. ${m.lockedUp === me.id ? "You sit" : "They sit"} out round ${m.afterRound + 1}.</p>` : `<h2>Nobody goes in the stocks</h2>`}</div>
-    ${a ? `<div class="panel"><h3>Your audit (private)</h3>${a.caught ? `<p>They checked your last votes. You backed HARM ${a.harmCount} times. You quietly pay a fine of <b>${coins(a.amount)}</b>.</p>` : `<p>They checked your last votes and found nothing. You get <b>${coins(a.amount)}</b> compensation.</p>`}<p class="muted small">Nobody else knows which. Say what you like.</p></div>` : ""}
-    ${moveOnButton()}`;
+  const id = pub.accusation.accused;
+  if (!id) return `<div class="stack"><span class="disc xl hollow"></span><h1>Nobody is accused</h1><p style="font-size:20px">The town couldn't make up its mind. Everyone's secrets stay secret, for now.</p>${moveOn("Back to it")}</div>`;
+  const p = P(id);
+  const ag = pub.agendas.find((a) => a.key === p.agenda);
+  return `<div class="stack">
+    ${person(id, "xl")}
+    <h1>${id === me.id ? "You're" : `${esc(p.name)} is`} in the stocks</h1>
+    <p class="soft">${pub.accusation.pointsAgainst} ${pub.accusation.pointsAgainst === 1 ? "person" : "people"} pointed. ${id === me.id ? "You sit" : "They sit"} out round ${pub.accusation.afterRound + 1}.</p>
+    <div class="secret row" style="align-items:flex-start">
+      <span class="disc lg" style="--c:${AGENDA_COLOUR[ag.key]}">${icon(ag.key)}</span>
+      <div><p class="soft" style="margin:0 0 4px">Their secret agenda</p><h2>${esc(ag.name)}</h2><p style="margin-top:8px">${esc(ag.goal)}</p></div>
+    </div>
+    ${moveOn("Back to it")}
+  </div>`;
 }
 
-// ----- REVEAL
+// ---------------------------------------------------------------------------------------
+// End
 
-function reveal() {
+function end() {
   const { pub, me, reveal: rv } = view;
-  const name = (id) => esc(rv.players.find((p) => p.id === id)?.name ?? "?");
   const o = rv.outcome;
-  const ranked = [...rv.players].sort((a, b) => b.wallet - a.wallet);
-  const side = (s) => (s === "H" ? `<span class="good">HELP</span>` : s === "X" ? `<span class="bad">HARM</span>` : `<span class="muted">–</span>`);
+  const name = (id) => esc(rv.players.find((p) => p.id === id)?.name ?? "?");
+  const ranked = [...rv.players].sort((a, b) => o.scores[b.id].total - o.scores[a.id].total);
   const head = o.collapsed
-    ? `<h1>The town collapsed</h1><p>Prosperity hit zero. <b>Everybody loses.</b></p><p>Richest in the ruins: <b>${ranked.length ? name(ranked[0].id) : "?"}</b>, for all the good it did them.</p>`
-    : `<h1>${o.winners.length > 1 ? "Joint winners" : "Richest resident"}: ${o.winners.map(name).join(" & ")}</h1><p>The town finished at prosperity ${rv.finalProsperity}.</p>`;
-  const m = rv.meeting;
-  return `${head}
-    <div class="panel"><h2>Final wallets</h2><ul class="plain">${ranked.map((p) => `<li><span>${name(p.id)} <span class="muted small">${titleCase(p.profession)}</span></span><b>${p.wallet}</b></li>`).join("")}</ul></div>
-    ${rv.awards.length ? `<div class="panel"><h2>Town awards</h2><p class="muted small">Playful labels, not moral judgements.</p><ul class="plain">${rv.awards.map((a) => `<li><span><b>${esc(a.title)}</b><br><span class="muted small">${esc(a.blurb)}</span></span><span>${a.winners.map(name).join(", ")}</span></li>`).join("")}</ul></div>` : ""}
-    <div class="panel scroll"><h2>Who backed what</h2><table><thead><tr><th>Round</th>${rv.players.map((p) => `<th>${name(p.id)}</th>`).join("")}<th>Result</th></tr></thead><tbody>
-      ${rv.rounds.map((r) => `<tr><td>${r.round}. ${esc(r.card.title)}</td>${rv.players.map((p) => `<td>${r.lockedUp === p.id ? "stocks" : side(r.votes[p.id])}${r.bribeLocked[p.id] ? "*" : ""}</td>`).join("")}<td>${r.result?.winner ? side(r.result.winner) : "–"}</td></tr>`).join("")}
-    </tbody></table><p class="muted small">* vote locked by a bribe</p></div>
-    <div class="panel"><h2>Bribes</h2>${rv.bribes.length ? `<ul class="plain">${rv.bribes.map((b) => `<li><span>Round ${b.round}: ${name(b.from)} offered ${name(b.to)} ${coins(b.amount)} to back ${b.side === "H" ? "HELP" : "HARM"}</span><span>${b.status}</span></li>`).join("")}</ul>` : `<p class="muted">None. Suspiciously clean.</p>`}</div>
-    <div class="panel"><h2>Loans</h2>${rv.loans.length ? `<ul class="plain">${rv.loans.map((l) => `<li><span>${name(l.lender)} lent ${name(l.borrower)} ${coins(l.amount)}</span><span>repaid ${l.repaid}/${l.owed}</span></li>`).join("")}</ul>` : `<p class="muted">None.</p>`}</div>
-    ${m ? `<div class="panel"><h2>The Town Meeting</h2>
-      <ul class="plain">${Object.entries(m.rumours).map(([h, r]) => { const fake = m.plants.find((p) => p.recipient === h); return `<li><span>${name(h)} heard: ${name(r.subject)} backed HARM ${r.count}×</span><span>${fake ? `<b>planted by ${name(fake.planter)}</b>` : "true"}</span></li>`; }).join("")}</ul>
-      <p>Nominations: ${Object.entries(m.nominations).map(([a, b]) => `${name(a)} → ${b ? name(b) : "nobody"}`).join(" · ") || "none"}</p>
-      <p>${m.lockedUp ? `${name(m.lockedUp)} went in the stocks and was ${m.audit.caught ? `<b>caught</b>, paying ${coins(m.audit.amount)}` : `<b>innocent</b>, receiving ${coins(m.audit.amount)}`}.` : "Nobody went in the stocks."}</p></div>` : ""}
-    <div class="panel scroll"><h2>The numbers</h2><table><thead><tr><th></th><th>HELP</th><th>HARM</th><th>Skimmed</th><th>Pot</th><th>Events</th><th>Dividends</th></tr></thead><tbody>
-      ${rv.players.map((p) => `<tr><td>${name(p.id)}</td><td>${p.stats.helpVotes}</td><td>${p.stats.harmVotes}</td><td>${p.stats.skimmed}</td><td>${signed(p.stats.potWinnings)}</td><td>${signed(p.stats.cardNet)}</td><td>${p.stats.dividends}</td></tr>`).join("")}
-    </tbody></table></div>
-    ${me.isHost || !pub.players.find((p) => p.isHost)?.connected ? `<p><button data-cmd='{"type":"REMATCH"}'>Rematch (back to the lobby)</button></p>` : `<p class="muted">Waiting for the host to start a rematch.</p>`}`;
+    ? `<span class="disc xl" style="--c:var(--stone)">${icon("ruin")}</span><h1 class="display" style="font-size:clamp(56px,17vw,96px)">The town fell</h1><p style="font-size:20px">Prosperity hit zero. <b>Everybody loses.</b> Here's who did it.</p>`
+    : `<span class="disc xl" style="--c:var(--sun)">${icon("crown")}</span><h1 class="display" style="font-size:clamp(56px,17vw,96px)">${o.winners.map(name).join(" & ")} win${o.winners.length > 1 ? "" : "s"}</h1><p style="font-size:20px">The town finished at ${rv.town} of ${pub.townMax}.</p>`;
+  return `<div class="stack">${head}</div>
+  <hr class="rule">
+  <h2>The scores</h2>
+  <ul class="scores">${ranked.map((p) => {
+    const s = o.scores[p.id];
+    return `<li>${person(p.id)}<div><b>${name(p.id)}</b><br><span class="small"><span class="disc xs" style="--c:${AGENDA_COLOUR[p.agenda]};vertical-align:-8px">${icon(p.agenda)}</span> ${esc(p.agendaName)}</span><br><span class="small soft">${s.coins} coins + ${s.bonus} bonus. ${esc(s.bonusReason)}</span></div><span class="total">${s.total}</span></li>`;
+  }).join("")}</ul>
+  <hr class="rule">
+  <h2>Who backed what</h2>
+  <div style="overflow-x:auto;margin-top:12px"><table class="grid-votes"><thead><tr><th></th>${rv.rounds.map((r) => `<th>${r.round}</th>`).join("")}<th>Harm</th></tr></thead><tbody>
+    ${rv.players.map((p) => `<tr><td>${name(p.id)}</td>${rv.rounds.map((r) => { const v = r.votes[p.id]; return `<td>${r.sittingOut === p.id ? `<span class="vdot out" title="In the stocks"></span>` : v ? `<span class="vdot ${v} ${r.bribeLocked[p.id] ? "locked" : ""}" title="${v === "H" ? "Help" : "Harm"}"></span>` : "–"}</td>`; }).join("")}<td><b>${p.harmVotes}</b></td></tr>`).join("")}
+    <tr><td class="soft">Result</td>${rv.rounds.map((r) => `<td>${r.winner ? `<span class="vdot ${r.winner}"></span>` : "–"}</td>`).join("")}<td></td></tr>
+  </tbody></table></div>
+  <p class="small soft" style="margin-top:8px"><span class="vdot H"></span> help &nbsp; <span class="vdot X"></span> harm &nbsp; <span class="vdot X locked"></span> bribed &nbsp; <span class="vdot out"></span> in the stocks</p>
+  <hr class="rule">
+  <h2>Bribes</h2>
+  ${rv.bribes.length ? `<ul class="people">${rv.bribes.map((b) => `<li>${disc("bribe", "var(--moss)", "sm")}<span class="grow">Round ${b.round}: <b>${name(b.from)}</b> paid <b>${name(b.to)}</b> to ${b.side === "H" ? "help" : "harm"}</span></li>`).join("")}</ul>` : `<p class="soft" style="margin-top:8px">Nobody took a bribe. Allegedly.</p>`}
+  ${rv.accusation ? `<hr class="rule"><h2>The accusation</h2><ul class="people">${Object.entries(rv.accusation.nominations).map(([a, b]) => `<li>${person(a, "sm")}<span class="grow"><b>${name(a)}</b> pointed at ${b ? `<b>${name(b)}</b>` : "nobody"}</span></li>`).join("")}</ul>` : ""}
+  <div style="margin-top:28px">${me.isHost || !pub.players.find((p) => p.isHost)?.connected ? `<button class="btn wide" data-cmd='{"type":"REMATCH"}'>Play again</button>` : `<p class="soft" style="text-align:center">Waiting for the host to start another game.</p>`}</div>`;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -480,18 +457,15 @@ function reveal() {
 
 function wire() {
   app.querySelectorAll("[data-cmd]").forEach((b) => (b.onclick = () => send(JSON.parse(b.dataset.cmd))));
-  app.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => toast("Link copied."))));
-  const forms = {
-    bribe: () => ({ type: "OFFER_BRIBE", to: $("#b-to").value, side: $("#b-side").value, amount: Number($("#b-amt").value) }),
-    loan: () => ({ type: "OFFER_LOAN", to: $("#l-to").value, amount: Number($("#l-amt").value) }),
-    plant: () => ({ type: "PLANT", target: $("#pl-to").value, count: Number($("#pl-n").value) }),
-  };
-  app.querySelectorAll("form[data-form]").forEach((f) => {
-    f.onsubmit = (e) => {
-      e.preventDefault();
-      send(forms[f.dataset.form]());
-    };
-  });
+  app.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Invite link copied."); } catch { toast(b.dataset.copy); }
+  }));
+  const fold = app.querySelector("details.fold");
+  if (fold) fold.ontoggle = () => (bribeOpen = fold.open);
+  app.querySelectorAll("[data-bribe-to]").forEach((b) => (b.onclick = () => { bribeDraft.to = b.dataset.bribeTo; render(); }));
+  app.querySelectorAll("[data-bribe-side]").forEach((b) => (b.onclick = () => { bribeDraft.side = b.dataset.bribeSide; render(); }));
+  const sendBribe = app.querySelector("[data-bribe-send]");
+  if (sendBribe) sendBribe.onclick = () => { send({ type: "OFFER_BRIBE", to: bribeDraft.to, side: bribeDraft.side }); bribeDraft = { to: null, side: "X" }; bribeOpen = false; };
 }
 
 $("#chat-form").onsubmit = (e) => {
@@ -502,19 +476,12 @@ $("#chat-form").onsubmit = (e) => {
   input.value = "";
 };
 
-// ---------------------------------------------------------------------------------------
-// Boot
-
 function boot() {
   const code = (location.hash.match(/^#\/([A-Za-z0-9]{6})$/)?.[1] ?? "").toUpperCase();
-  if (ws) {
-    ws.onclose = null;
-    ws.close();
-    ws = null;
-  }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
   session = code ? store.get(code) : null;
   if (session) connect();
-  else renderHome(code);
+  else home(code);
 }
 window.addEventListener("hashchange", () => {
   const code = location.hash.slice(2).toUpperCase();

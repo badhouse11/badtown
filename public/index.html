@@ -3,21 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Good Neighbours (prototype)</title>
-  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#ece8df">
+  <title>Good Neighbours</title>
+  <meta name="description" content="A party game about helping your town, or helping yourself. 3 to 8 players, one phone each.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='24' fill='%23f3c843'/%3E%3Cpath d='M24 10 9 23h4v15h8v-8h6v8h8V23h4z'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- FUNCTIONAL PLACEHOLDER UI. No visual identity yet: that comes with the creative-direction brief. -->
   <header id="bar" hidden></header>
-  <main id="app"><p class="muted">Loading…</p></main>
-  <section id="chat" hidden>
+  <main id="app"><p class="soft">Loading…</p></main>
+  <section id="chat" hidden aria-label="Town chat">
     <details>
-      <summary>Town chat <span id="chat-count"></span></summary>
+      <summary><span id="chat-icon"></span> Town chat <span id="chat-count" class="soft"></span></summary>
       <ol id="chat-log"></ol>
       <form id="chat-form" autocomplete="off">
-        <input id="chat-input" maxlength="200" placeholder="Say something persuasive…" aria-label="Chat message">
-        <button>Send</button>
+        <input id="chat-input" maxlength="200" placeholder="Say something persuasive" aria-label="Chat message">
+        <button class="btn">Send</button>
       </form>
     </details>
   </section>
