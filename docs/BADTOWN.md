@@ -1,7 +1,7 @@
 # BADTOWN: pitch and design (draft 1)
 
 **Owners:** Tim Hyland and Claude. Claude builds.
-**Status:** proposed design, simulated, not yet built. It replaces Good Neighbours in this repo once agreed.
+**Status:** engine, bots and a solo practice mode built (`src/badtown/`, `practice/`). Multiplayer next.
 
 ## The pitch
 
@@ -27,11 +27,13 @@ A 15-minute social deduction game for 4 to 8 phones.
 
 | Players | Guards | Inmates | Rats (secret, inmates) | Wall distance |
 |---|---|---|---|---|
-| 4 | 1 | 3 | 1 | 5 m |
-| 5 | 1 | 4 | 1 | 10 m |
-| 6 | 2 | 4 | 1 | 5 m |
-| 7 | 2 | 5 | 1 | 10 m |
-| 8 | 2 | 6 | 2 | 12 m |
+| 4 | 1 | 3 | 1 | 3 m |
+| 5 | 1 | 4 | 1 | 7 m |
+| 6 | 2 | 4 | 1 | 3 m |
+| 7 | 2 | 5 | 1 | 6 m |
+| 8 | 2 | 6 | 2 | 7 m |
+
+Wall distances were rebalanced on the real engine (`scripts/calibrate.ts`) with both sides playing their best strategies: 39 to 56% escapes at every table size.
 
 Uniforms are public. Each inmate gets a cell number. Rats know they're a Rat; at 8 players the two Rats don't know each other.
 
@@ -44,6 +46,14 @@ Uniforms are public. Each inmate gets a cell number. Rats know they're a Rat; at
    - **Spotlight** knocks 1 metre off tonight's digging.
    - Everyone holds their thumb on the screen for both lights-out steps, so nobody can tell who is doing what.
 4. **Morning:** "The tunnel grew N metres." Anyone caught is named.
+
+### The count (day 3)
+
+Before lights out on day 3, the cells vote on who the Rat is. Most votes wins; a tie names nobody.
+- **Right:** the Rat is exposed. No more whispers, and they can't be made Trusty.
+- **Wrong:** that innocent cellmate spends the night in the hole.
+
+In simulation the vote is balance-neutral at realistic accuracy: a sharp read adds 10 to 20 points of escape chance, a bad one costs 6 to 13.
 
 ### The Trusty (after night 3)
 
@@ -85,4 +95,3 @@ Each table size was simulated with best-response play: inmates choose how often 
 - Is the Mole too strong once it appears? Should it dig every other night?
 - Should the Rat get a stronger tool, e.g. one guaranteed-true tip per game?
 - Should there be a 3-player variant (1 Guard, 2 Inmates, no Rat)?
-- Do inmates need a way to out the Rat, e.g. a once-a-game cell-block vote?
