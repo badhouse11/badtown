@@ -4,11 +4,20 @@
   "private": true,
   "description": "GOOD NEIGHBOURS: a multiplayer social betting game for 4-8 players, hosted on Cloudflare.",
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "bots": "node scripts/bots.mjs"
+    "test": "node --test test/*.test.ts",
+    "local": "node scripts/local-server.ts",
+    "bots": "node scripts/bots.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
   }
 }

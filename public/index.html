@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Good Neighbours (prototype)</title>
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- FUNCTIONAL PLACEHOLDER UI. No visual identity yet: that comes with the creative-direction brief. -->
+  <header id="bar" hidden></header>
+  <main id="app"><p class="muted">Loading…</p></main>
+  <section id="chat" hidden>
+    <details>
+      <summary>Town chat <span id="chat-count"></span></summary>
+      <ol id="chat-log"></ol>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" maxlength="200" placeholder="Say something persuasive…" aria-label="Chat message">
+        <button>Send</button>
+      </form>
+    </details>
+  </section>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
