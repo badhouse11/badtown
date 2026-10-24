@@ -1,0 +1,14 @@
+{
+  "name": "badtown",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GOOD NEIGHBOURS: a multiplayer social betting game for 4-8 players, hosted on Cloudflare.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "bots": "node scripts/bots.mjs"
+  }
+}
