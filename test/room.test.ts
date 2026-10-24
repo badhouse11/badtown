@@ -82,9 +82,10 @@ test("create, join four players, start, and every socket gets only its own view"
   await send(room, seats[0].ws!, { type: "START" });
 
   const view = seats[1].ws!.last("STATE");
-  assert.equal(view.pub.phase, "NEGOTIATE");
+  assert.equal(view.pub.phase, "AGENDA");
   assert.equal(view.me.id, seats[1].playerId);
-  assert.equal(view.me.wallet, 12);
+  assert.equal(view.me.coins, 3);
+  assert.ok(view.me.agenda.name);
   assert.ok(!JSON.stringify(view).includes(seats[0].token));
   assert.ok(ctx.alarm !== null, "a deadline alarm is set");
 });
@@ -112,15 +113,16 @@ test("state survives a restart and players reconnect with their token", async ()
   for (const s of seats) s.ws = await connect(room, s.token);
   for (const s of seats) await send(room, s.ws, { type: "READY", ready: true });
   await send(room, seats[0].ws, { type: "START" });
-  await send(room, seats[0].ws, { type: "OFFER_LOAN", to: seats[1].playerId, amount: 4 });
+  for (const s of seats) await send(room, s.ws, { type: "READY_NEXT" });
+  await send(room, seats[0].ws, { type: "OFFER_BRIBE", to: seats[1].playerId, side: "X" });
 
   // Simulate eviction: all sockets drop, a fresh object loads from storage.
   for (const s of seats) s.ws.closed = 1006;
   const reborn = new Room(ctx as any, {});
   const ws = await connect(reborn, seats[1].token);
   const v = ws.last("STATE");
-  assert.equal(v.pub.phase, "NEGOTIATE");
-  assert.equal(v.me.loans.length, 1);
+  assert.equal(v.pub.phase, "TALK");
+  assert.equal(v.me.bribes.length, 1);
   assert.equal(v.pub.players.filter((p: any) => p.connected).length, 1);
 });
 
@@ -138,7 +140,7 @@ test("the alarm ends a phase even with nobody connected", async () => {
   const state = room.state!;
   state.deadline = Date.now() - 1;
   await room.alarm();
-  assert.equal(room.state!.phase, "VOTE");
+  assert.equal(room.state!.phase, "TALK");
 });
 
 test("duplicate command ids are only applied once", async () => {
@@ -150,10 +152,11 @@ test("duplicate command ids are only applied once", async () => {
   for (const s of seats) s.ws = await connect(room, s.token);
   for (const s of seats) await send(room, s.ws, { type: "READY", ready: true });
   await send(room, seats[0].ws, { type: "START" });
-  await send(room, seats[0].ws, { type: "OFFER_LOAN", to: seats[1].playerId, amount: 2 });
-  const loanId = room.state!.loans[0].id;
-  const msg = JSON.stringify({ type: "CMD", cid: "same-tap", cmd: { type: "RESPOND_LOAN", id: loanId, accept: true } });
+  for (const s of seats) await send(room, s.ws, { type: "READY_NEXT" });
+  await send(room, seats[0].ws, { type: "OFFER_BRIBE", to: seats[1].playerId, side: "H" });
+  const bribeId = room.state!.bribes[0].id;
+  const msg = JSON.stringify({ type: "CMD", cid: "same-tap", cmd: { type: "RESPOND_BRIBE", id: bribeId, accept: true } });
   await room.webSocketMessage(seats[1].ws, msg);
   await room.webSocketMessage(seats[1].ws, msg);
-  assert.equal(room.state!.players.find((p) => p.id === seats[1].playerId)!.wallet, 14);
+  assert.equal(room.state!.players.find((p) => p.id === seats[1].playerId)!.coins, 5);
 });

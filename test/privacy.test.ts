@@ -1,67 +1,41 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publicView, viewFor } from "../src/engine/view.ts";
-import { cmd, ids, setup, toVote } from "./helpers.ts";
+import { viewFor } from "../src/engine/view.ts";
+import { cmd, everyoneNext, ids, setup } from "./helpers.ts";
 
-test("public view never contains wallets, votes, bribes, loans or rumours", () => {
-  const s = setup(5);
-  const [a, b, c] = ids(s);
-  cmd(s, a, { type: "OFFER_BRIBE", to: b, amount: 2, side: "X" });
-  cmd(s, b, { type: "RESPOND_BRIBE", id: s.bribes[0].id, accept: true });
-  cmd(s, c, { type: "OFFER_LOAN", to: a, amount: 4 });
-  cmd(s, a, { type: "RESPOND_LOAN", id: s.loans[0].id, accept: true });
-  toVote(s);
-  cmd(s, a, { type: "VOTE", side: "H" });
-  const { rules, ...rest } = publicView(s); // rules are public settings like "bribeMin", not data
-  assert.ok(rules);
-  const json = JSON.stringify(rest);
-  for (const word of ["wallet", "votes", "bribe", "loan", "rumour", "tokenHash", "lender", "skim\":3"]) {
-    assert.ok(!json.includes(word), `public view leaked "${word}"`);
+test("nobody can see anyone else's agenda, coins, vote or bribe", () => {
+  const s = setup(4);
+  cmd(s, "p0", { type: "OFFER_BRIBE", to: "p1", side: "X" });
+  s.players[2].coins = 777;
+  s.minted += 774;
+  everyoneNext(s);
+  cmd(s, "p2", { type: "VOTE", side: "X" });
+  const v = viewFor(s, "p3");
+  const json = JSON.stringify(v);
+  for (const other of s.players.filter((p) => p.id !== "p3")) {
+    assert.ok(!json.includes(`"${other.agenda}"`) || (v.pub.agendas.some((a) => a.key === other.agenda)), "agenda only appears in the public catalogue");
   }
+  assert.ok(!json.includes("777"));
+  assert.equal(v.me!.bribes.length, 0);
+  assert.equal(v.me!.myVote, null);
+  assert.ok(!json.includes("hash"));
+  assert.equal(v.reveal, null);
+  for (const p of v.pub.players) assert.equal(p.agenda, null);
 });
 
-test("a player sees only their own secrets", () => {
-  const s = setup(5);
-  const [a, b, c, d] = ids(s);
-  cmd(s, a, { type: "OFFER_BRIBE", to: b, amount: 2, side: "X" });
-  cmd(s, c, { type: "OFFER_LOAN", to: a, amount: 2 });
-  const vd = viewFor(s, d);
-  assert.equal(vd.me!.bribes.length, 0);
-  assert.equal(vd.me!.loans.length, 0);
-  assert.equal(vd.reveal, null);
-  const vb = viewFor(s, b);
-  assert.equal(vb.me!.bribes.length, 1);
-  assert.equal(vb.me!.wallet, 12);
-  // No other player's wallet value appears anywhere in someone else's payload.
-  s.players.find((p) => p.id === c)!.wallet = 777;
-  assert.ok(!JSON.stringify(viewFor(s, d)).includes("777"));
+test("the host sees nothing extra", () => {
+  const s = setup(3);
+  everyoneNext(s);
+  cmd(s, "p1", { type: "VOTE", side: "X" });
+  const v = viewFor(s, "p0");
+  assert.equal(v.me!.myVote, null);
+  assert.ok(!JSON.stringify(v.pub).includes('"votes"'));
 });
 
-test("the host gets no extra information", () => {
-  const s = setup(4);
-  const host = s.players.find((p) => p.isHost)!;
-  const other = s.players.find((p) => !p.isHost)!;
-  toVote(s);
-  cmd(s, other.id, { type: "VOTE", side: "X" });
-  const hv = viewFor(s, host.id);
-  assert.equal(hv.me!.myVote, null);
-  assert.ok(!JSON.stringify(hv).includes('"X"'));
-});
-
-test("token hashes are never sent to anyone, even at the reveal", () => {
-  const s = setup(4);
-  s.phase = "REVEAL";
-  s.outcome = { collapsed: false, winners: [], reason: "rounds" };
-  for (const id of ids(s)) assert.ok(!JSON.stringify(viewFor(s, id)).includes("hash"));
-});
-
-test("everything is revealed at the end", () => {
-  const s = setup(4);
-  toVote(s);
-  for (const id of ids(s)) cmd(s, id, { type: "VOTE", side: "X" });
-  s.phase = "REVEAL";
-  s.outcome = { collapsed: false, winners: [], reason: "rounds" };
-  const v = viewFor(s, ids(s)[0]);
-  assert.ok(v.reveal);
-  assert.equal(v.reveal!.rounds[0].votes[ids(s)[1]], "X");
+test("your own agenda is visible only to you", () => {
+  const s = setup(3);
+  for (const id of ids(s)) {
+    const me = viewFor(s, id).me!;
+    assert.equal(me.agenda!.key, s.players.find((p) => p.id === id)!.agenda);
+  }
 });

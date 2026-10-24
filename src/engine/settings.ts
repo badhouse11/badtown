@@ -1,78 +1,82 @@
-// Every tunable number in the game lives here. Nothing is hard-coded elsewhere.
-// Values come from design v1.1 and the economy simulations in /sim.
+// Every tunable number in the game. Values from design v2 and /sim/sim_v2.py.
 
 export interface Settings {
   minPlayers: number;
   maxPlayers: number;
-  startCoins: number;
-  stake: number;
-  /** Coins every HARM voter pockets, win or lose. */
-  skim: number;
-  /** Coins every resident (not locked up) receives when HELP wins. */
-  dividend: number;
-  startProsperity: number;
-  maxProsperity: number;
-  /** On a tie, pro-town wins if prosperity is at least this. */
-  tieHelpAt: number;
   rounds: number;
-  /** The Town Meeting happens after this round. 0 disables it. */
-  meetingAfterRound: number;
-  /** Number of a locked-up resident's most recent votes that are audited. */
-  auditWindow: number;
-  /** HARM votes within the window that count as caught skimming. */
-  auditThreshold: number;
-  /** Fine per HARM vote in the window when caught. */
-  finePerHarm: number;
-  /** Compensation for a wrongly locked-up resident. */
-  wrongfulComp: number;
-  plantCost: number;
-  bribeMin: number;
-  bribeMax: number;
-  loanSizes: number[];
-  loanInterest: number;
+  startCoins: number;
+  /** Coins you pocket for backing HARM, win or lose. */
+  skim: number;
+  /** Coins everyone (not sitting out) gets when HELP wins. */
+  dividend: number;
+  townStart: number;
+  townMax: number;
+  /** Town change when HELP wins / HARM wins. Ties change nothing. */
+  helpUp: number;
+  harmDrop: number;
+  /** The accusation happens after this round. */
+  accuseAfter: number;
+  /** A bribe is always this many coins. */
+  bribe: number;
+  bonus: {
+    pillar: number;
+    pillarTown: number;
+    developer: number;
+    gossip: number;
+    chameleon: number;
+    martyr: number;
+    fixer: number;
+    snake: number;
+    snakeCap: number;
+    neighbour: number;
+  };
   /** Phase timers in seconds. */
   timers: {
-    negotiate: number;
+    agenda: number;
+    talk: number;
     vote: number;
-    recap: number;
-    plant: number;
-    discuss: number;
-    nominate: number;
-    lockup: number;
+    result: number;
+    gossip: number;
+    accuse: number;
+    verdict: number;
   };
   chatMaxLength: number;
   chatHistory: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  minPlayers: 4,
+  minPlayers: 3,
   maxPlayers: 8,
-  startCoins: 12,
-  stake: 2,
-  skim: 3,
+  rounds: 6,
+  startCoins: 3,
+  skim: 2,
   dividend: 1,
-  startProsperity: 4,
-  maxProsperity: 8,
-  tieHelpAt: 4,
-  rounds: 8,
-  meetingAfterRound: 4,
-  auditWindow: 3,
-  auditThreshold: 2,
-  finePerHarm: 3,
-  wrongfulComp: 2,
-  plantCost: 1,
-  bribeMin: 1,
-  bribeMax: 3,
-  loanSizes: [2, 4],
-  loanInterest: 1,
+  townStart: 5,
+  townMax: 10,
+  helpUp: 1,
+  harmDrop: 2,
+  accuseAfter: 3,
+  bribe: 2,
+  bonus: {
+    pillar: 8,
+    pillarTown: 8,
+    developer: 2,
+    gossip: 5,
+    chameleon: 3,
+    martyr: 8,
+    fixer: 4,
+    snake: 1,
+    snakeCap: 3,
+    neighbour: 8,
+  },
   timers: {
-    negotiate: 45,
+    agenda: 25,
+    talk: 60,
     vote: 30,
-    recap: 20,
-    plant: 20,
-    discuss: 45,
-    nominate: 30,
-    lockup: 12,
+    result: 14,
+    gossip: 45,
+    accuse: 30,
+    verdict: 12,
   },
   chatMaxLength: 200,
   chatHistory: 60,

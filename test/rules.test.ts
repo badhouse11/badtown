@@ -1,182 +1,184 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyCommand, currentRound, moneyBalances, onDeadline } from "../src/engine/engine.ts";
-import { cmd, ids, setup, T0, toVote, wallet } from "./helpers.ts";
+import { CARDS } from "../src/engine/cards.ts";
+import { currentRound, moneyBalances, onDeadline, scoreOf } from "../src/engine/engine.ts";
+import type { Agenda } from "../src/engine/types.ts";
+import { cmd, coins, everyoneNext, ids, playRound, setup, T0 } from "./helpers.ts";
 
-function vote(s: ReturnType<typeof setup>, sides: Record<string, "H" | "X">) {
-  for (const [id, side] of Object.entries(sides)) {
-    const r = cmd(s, id, { type: "VOTE", side });
-    assert.ok(r.ok, r.ok ? "" : r.error);
-  }
-}
-
-test("game starts with unique professions, 12 coins each and prosperity 4", () => {
-  const s = setup(6);
-  assert.equal(s.phase, "NEGOTIATE");
-  assert.equal(new Set(s.players.map((p) => p.profession)).size, 6);
-  for (const p of s.players) assert.equal(p.wallet, 12);
-  assert.equal(s.prosperity, 4);
-  assert.ok(moneyBalances(s));
+test("deck: 36 unique, fully written cards", () => {
+  assert.equal(CARDS.length, 36);
+  assert.equal(new Set(CARDS.map((c) => c.id)).size, 36);
+  for (const c of CARDS) for (const k of ["title", "premise", "helpLabel", "harmLabel", "helpResult", "harmResult", "icon"] as const) assert.ok(c[k].length > 2, `${c.id}.${k}`);
 });
 
-test("only cards for professions in play (or universal) are in the deck", () => {
+test("works with 3 players: unique agendas, 3 starting coins, town at 5", () => {
+  const s = setup(3);
+  assert.equal(s.phase, "TALK");
+  assert.equal(new Set(s.players.map((p) => p.agenda)).size, 3);
+  for (const p of s.players) assert.equal(p.coins, 3);
+  assert.equal(s.town, 5);
+});
+
+test("HELP majority: town +1, everyone gets the dividend, HARM voters still skim", () => {
   const s = setup(4);
-  const profs = new Set(s.players.map((p) => p.profession));
-  assert.equal(s.deck.length, 60);
-  for (const id of s.deck) {
-    const prof = { FAR: "FARMER", DOC: "DOCTOR", BUI: "BUILDER", BAN: "BANKER", TEA: "TEACHER", MAY: "MAYOR", GRO: "GROCER", MEC: "MECHANIC", UNI: null }[id.slice(0, 3)];
-    assert.ok(prof === null || profs.has(prof as any), id);
-  }
-});
-
-test("HELP 3 vs HARM 2: whole-coin split with leftovers rolled into the pot", () => {
-  const s = setup(5);
-  toVote(s);
-  const [a, b, c, d, e] = ids(s);
-  vote(s, { [a]: "H", [b]: "H", [c]: "H", [d]: "X", [e]: "X" });
+  playRound(s, (id) => (id === "p3" ? "X" : "H"));
   const r = currentRound(s)!.result!;
+  assert.equal(s.phase, "RESULT");
   assert.equal(r.winner, "H");
-  for (const id of [a, b, c]) assert.equal(r.settlements[id].payout, 3); // 2 back + floor(4/3)
-  for (const id of [d, e]) {
-    assert.equal(r.settlements[id].payout, 0);
-    assert.equal(r.settlements[id].skim, 3); // skim paid even when HARM loses
-  }
-  assert.equal(s.pot, 1); // the leftover coin rolls over
-  assert.equal(s.prosperity, 5);
-  for (const id of ids(s)) assert.equal(r.settlements[id].dividend, 1);
+  assert.equal(s.town, 6);
+  assert.equal(coins(s, "p0"), 4);
+  assert.equal(coins(s, "p3"), 3 + 2 + 1);
+  assert.equal(r.flips.length, 4);
+  assert.equal(r.flips.filter((f) => f === "X").length, 1);
   assert.ok(moneyBalances(s));
 });
 
-test("HARM 3 vs HELP 1: harm wins, splits the stake and the town loses prosperity", () => {
-  const s = setup(4);
-  toVote(s);
-  const [a, b, c, d] = ids(s);
-  vote(s, { [a]: "X", [b]: "X", [c]: "X", [d]: "H" });
-  const r = currentRound(s)!.result!;
-  assert.equal(r.winner, "X");
-  for (const id of [a, b, c]) assert.equal(r.settlements[id].payout, 2); // 2 back + floor(2/3)=0
-  assert.equal(s.pot, 2);
-  assert.equal(s.prosperity, 3);
-  for (const id of ids(s)) assert.equal(r.settlements[id].dividend, 0);
-  assert.ok(moneyBalances(s));
+test("HARM majority: town -2, no dividend", () => {
+  const s = setup(3);
+  playRound(s, (id) => (id === "p0" ? "H" : "X"));
+  assert.equal(currentRound(s)!.result!.winner, "X");
+  assert.equal(s.town, 3);
+  assert.equal(coins(s, "p0"), 3);
+  assert.equal(coins(s, "p1"), 5);
 });
 
-test("tie rule: pro-town wins at prosperity 4, anti-town at 3", () => {
-  for (const [pros, expected] of [[4, "H"], [3, "X"]] as const) {
-    const s = setup(4);
-    s.prosperity = pros;
-    toVote(s);
-    const [a, b, c, d] = ids(s);
-    vote(s, { [a]: "H", [b]: "H", [c]: "X", [d]: "X" });
-    const r = currentRound(s)!.result!;
-    assert.equal(r.winner, expected);
-    assert.equal(r.tieBroken, true);
-  }
+test("tie: town unchanged, no dividend", () => {
+  const s = setup(4);
+  playRound(s, (id) => (id === "p0" || id === "p1" ? "H" : "X"));
+  assert.equal(currentRound(s)!.result!.winner, null);
+  assert.equal(s.town, 5);
 });
 
-test("unanimous HARM: stakes back, everyone skims, prosperity drops", () => {
-  const s = setup(4);
-  toVote(s);
-  vote(s, Object.fromEntries(ids(s).map((id) => [id, "X"])));
-  const r = currentRound(s)!.result!;
-  assert.equal(r.unanimous, true);
-  for (const id of ids(s)) {
-    assert.equal(r.settlements[id].payout, 2);
-    assert.equal(r.settlements[id].skim, 3);
-  }
-  assert.equal(s.prosperity, 3);
-});
-
-test("collapse: prosperity 0 ends the game and nobody wins", () => {
-  const s = setup(4);
-  s.prosperity = 1;
-  toVote(s);
-  vote(s, Object.fromEntries(ids(s).map((id) => [id, "X"])));
-  assert.equal(s.phase, "REVEAL");
+test("collapse shows the reveal first, then ends with no winner", () => {
+  const s = setup(3);
+  s.town = 2;
+  playRound(s, () => "X");
+  assert.equal(s.phase, "RESULT");
+  assert.equal(s.town, 0);
+  everyoneNext(s);
+  assert.equal(s.phase, "END");
   assert.equal(s.outcome!.collapsed, true);
   assert.deepEqual(s.outcome!.winners, []);
 });
 
-test("timeout abstains: no votes means no stake and no result", () => {
-  const s = setup(4);
-  toVote(s);
-  const before = ids(s).map((id) => wallet(s, id));
+test("timeouts: unvoted players simply don't vote", () => {
+  const s = setup(3);
+  everyoneNext(s);
+  cmd(s, "p0", { type: "VOTE", side: "H" });
   onDeadline(s, s.deadline! + 1);
-  const r = s.rounds[0].result!;
-  assert.equal(r.winner, null);
-  assert.deepEqual(ids(s).map((id) => wallet(s, id)), before);
-  assert.equal(s.phase, "RECAP");
+  const r = currentRound(s)!.result!;
+  assert.equal(r.help, 1);
+  assert.equal(r.harm, 0);
 });
 
-test("card effects hit the named targets and never go below zero", () => {
+test("bribe: 2 coins move once, the vote is locked, duplicates ignored", () => {
   const s = setup(4);
-  const rec = currentRound(s)!;
-  s.players.find((p) => p.id === rec.primary)!.wallet = 2; // keep enough to stake, nothing after
-  s.minted -= 10; // keep the money check honest after the manual edit
-  toVote(s);
-  vote(s, Object.fromEntries(ids(s).map((id) => [id, "X"])));
-  for (const p of s.players) assert.ok(p.wallet >= 0);
-  assert.ok(moneyBalances(s));
-});
-
-test("bribe: accepted once, coins move once, vote locked, duplicate clicks ignored", () => {
-  const s = setup(4);
-  const [a, b] = ids(s);
-  assert.ok(cmd(s, a, { type: "OFFER_BRIBE", to: b, amount: 3, side: "X" }).ok);
-  assert.equal(cmd(s, a, { type: "OFFER_BRIBE", to: b, amount: 1, side: "X" }).ok, false); // one offer per round
+  assert.ok(cmd(s, "p0", { type: "OFFER_BRIBE", to: "p1", side: "X" }).ok);
+  assert.equal(cmd(s, "p0", { type: "OFFER_BRIBE", to: "p2", side: "X" }).ok, false);
   const id = s.bribes[0].id;
-  assert.ok(applyCommand(s, b, "dup-1", { type: "RESPOND_BRIBE", id, accept: true }, T0).ok);
-  const again = applyCommand(s, b, "dup-1", { type: "RESPOND_BRIBE", id, accept: true }, T0);
-  assert.equal((again as any).duplicate, true);
-  assert.equal(wallet(s, a), 9);
-  assert.equal(wallet(s, b), 15);
-  toVote(s);
-  assert.equal(currentRound(s)!.votes[b], "X");
-  assert.equal(cmd(s, b, { type: "VOTE", side: "H" }).ok, false); // locked
+  assert.ok(cmd(s, "p1", { type: "RESPOND_BRIBE", id, accept: true }).ok);
+  assert.equal(cmd(s, "p1", { type: "RESPOND_BRIBE", id, accept: true }).ok, false);
+  assert.equal(coins(s, "p0"), 1);
+  assert.equal(coins(s, "p1"), 5);
+  everyoneNext(s);
+  assert.equal(currentRound(s)!.votes["p1"], "X");
+  assert.equal(cmd(s, "p1", { type: "VOTE", side: "H" }).ok, false);
   assert.ok(moneyBalances(s));
 });
 
-test("bribe declined moves nothing; unaffordable bribe is refused", () => {
-  const s = setup(4);
-  const [a, b, c] = ids(s);
-  cmd(s, a, { type: "OFFER_BRIBE", to: b, amount: 2, side: "H" });
-  assert.ok(cmd(s, b, { type: "RESPOND_BRIBE", id: s.bribes[0].id, accept: false }).ok);
-  assert.equal(wallet(s, a), 12);
-  s.players.find((p) => p.id === c)!.wallet = 0;
-  s.minted -= 12;
-  assert.equal(cmd(s, c, { type: "OFFER_BRIBE", to: b, amount: 1, side: "H" }).ok, false);
+test("can't bribe without the coins", () => {
+  const s = setup(3);
+  s.players[0].coins = 1;
+  s.minted -= 2;
+  assert.equal(cmd(s, "p0", { type: "OFFER_BRIBE", to: "p1", side: "H" }).ok, false);
 });
 
-test("a bribed player can't spend their stake on a loan", () => {
-  const s = setup(4);
-  const [a, b, c] = ids(s);
-  s.players.find((p) => p.id === b)!.wallet = 0;
-  s.minted -= 12;
-  cmd(s, a, { type: "OFFER_BRIBE", to: b, amount: 2, side: "X" });
-  assert.ok(cmd(s, b, { type: "RESPOND_BRIBE", id: s.bribes[0].id, accept: true }).ok);
-  assert.equal(cmd(s, b, { type: "OFFER_LOAN", to: c, amount: 2 }).ok, false);
+function toAccusation(n: number, harmer = "p0") {
+  const s = setup(n);
+  for (let r = 1; r <= 3; r++) {
+    playRound(s, (id) => (id === harmer && r >= 2 ? "X" : "H"));
+    everyoneNext(s);
+  }
+  assert.equal(s.phase, "GOSSIP");
+  return s;
+}
+
+test("accusation after round 3: everyone hears one true rumour about someone else", () => {
+  const s = toAccusation(5);
+  const a = s.accusation!;
+  assert.equal(Object.keys(a.rumours).length, 5);
+  assert.equal(new Set(Object.values(a.rumours).map((r) => r.subject)).size, 5);
+  for (const [h, r] of Object.entries(a.rumours)) {
+    assert.notEqual(h, r.subject);
+    assert.equal(r.count, r.subject === "p0" ? 2 : 0);
+  }
 });
 
-test("loans transfer on acceptance and repay with interest at the end, capped at the wallet", () => {
+test("the accused sits out the next round and their agenda is revealed to everyone", async () => {
+  const { publicView } = await import("../src/engine/view.ts");
+  const s = toAccusation(4);
+  everyoneNext(s); // GOSSIP -> ACCUSE
+  for (const id of ids(s)) cmd(s, id, { type: "NOMINATE", target: id === "p0" ? "p1" : "p0" });
+  assert.equal(s.phase, "VERDICT");
+  assert.equal(s.accusation!.accused, "p0");
+  const v = publicView(s);
+  assert.equal(v.players.find((p) => p.id === "p0")!.agenda, s.players[0].agenda);
+  assert.equal(v.players.find((p) => p.id === "p1")!.agenda, null);
+  everyoneNext(s);
+  assert.equal(s.round, 4);
+  everyoneNext(s);
+  assert.ok(!currentRound(s)!.eligible.includes("p0"));
+  assert.equal(cmd(s, "p0", { type: "VOTE", side: "H" }).ok, false);
+});
+
+function scoreWith(agenda: Agenda, setupFn: (s: ReturnType<typeof setup>) => void) {
   const s = setup(4);
-  const [a, b, c] = ids(s);
-  assert.ok(cmd(s, a, { type: "OFFER_LOAN", to: b, amount: 4 }).ok);
-  assert.ok(cmd(s, b, { type: "RESPOND_LOAN", id: s.loans[0].id, accept: true }).ok);
-  assert.equal(wallet(s, a), 8);
-  assert.equal(wallet(s, b), 16);
-  assert.ok(cmd(s, c, { type: "OFFER_LOAN", to: b, amount: 2 }).ok);
-  assert.ok(cmd(s, b, { type: "RESPOND_LOAN", id: s.loans[1].id, accept: true }).ok);
-  // Fast-forward to the end with b nearly broke.
-  s.players.find((p) => p.id === b)!.wallet = 6;
-  s.minted -= 12;
-  s.round = s.settings.rounds;
-  s.phase = "RECAP";
-  s.deadline = T0;
-  onDeadline(s, T0 + 1);
-  assert.equal(s.phase, "REVEAL");
-  assert.equal(s.loans[0].repaid, 5); // first loan: 4 + 1 interest
-  assert.equal(s.loans[1].repaid, 1); // second loan gets what's left
-  assert.equal(wallet(s, b), 0);
+  s.players[0].agenda = agenda;
+  setupFn(s);
+  return scoreOf(s, "p0");
+}
+
+test("agenda scoring", () => {
+  assert.equal(scoreWith("pillar", (s) => (s.town = 8)).bonus, 8);
+  assert.equal(scoreWith("pillar", (s) => (s.town = 7)).bonus, 0);
+  assert.equal(scoreWith("martyr", (s) => playRound(s, () => "H")).bonus, 8);
+  assert.equal(scoreWith("martyr", (s) => playRound(s, () => "X")).bonus, 0);
+  assert.equal(scoreWith("developer", (s) => playRound(s, () => "X")).bonus, 2);
+  assert.equal(scoreWith("snake", (s) => playRound(s, (id) => (id === "p0" ? "X" : "H"))).bonus, 1);
+  assert.equal(scoreWith("chameleon", (s) => {
+    for (let i = 0; i < 2; i++) { playRound(s, (id) => (id === "p0" ? "X" : "H")); everyoneNext(s); }
+  }).bonus, 3);
+  assert.equal(scoreWith("fixer", (s) => {
+    cmd(s, "p0", { type: "OFFER_BRIBE", to: "p1", side: "H" });
+    cmd(s, "p1", { type: "RESPOND_BRIBE", id: s.bribes[0].id, accept: true });
+  }).bonus, 4);
+});
+
+test("gossip and neighbour agendas read the accusation", () => {
+  const s = toAccusation(4, "p2");
+  s.players[0].agenda = "gossip";
+  s.players[1].agenda = "neighbour";
+  everyoneNext(s);
+  cmd(s, "p0", { type: "NOMINATE", target: "p2" });
+  cmd(s, "p1", { type: "NOMINATE", target: "p2" });
+  cmd(s, "p2", { type: "NOMINATE", target: "p0" });
+  cmd(s, "p3", { type: "NOMINATE", target: "p2" });
+  assert.equal(scoreOf(s, "p0").bonus, 5);
+  assert.equal(scoreOf(s, "p1").bonus, 8);
+});
+
+test("a full game ends after 6 rounds with scores and a winner", () => {
+  const s = setup(3);
+  let guard = 0;
+  while (s.phase !== "END" && guard++ < 100) {
+    if (s.phase === "TALK" || s.phase === "RESULT" || s.phase === "GOSSIP" || s.phase === "VERDICT") everyoneNext(s);
+    else if (s.phase === "VOTE") for (const id of ids(s)) cmd(s, id, { type: "VOTE", side: "H" });
+    else if (s.phase === "ACCUSE") for (const id of ids(s)) cmd(s, id, { type: "NOMINATE", target: null });
+  }
+  assert.equal(s.phase, "END");
+  assert.equal(s.rounds.length, 6);
+  assert.equal(new Set(s.rounds.map((r) => r.cardId)).size, 6);
+  assert.ok(s.outcome!.winners.length >= 1);
   assert.ok(moneyBalances(s));
+  void T0;
 });
-

@@ -1,59 +1,25 @@
 import type { Settings } from "./settings.ts";
 
-export type Side = "H" | "X"; // H = pro-town (HELP), X = anti-town (HARM)
+export type Side = "H" | "X"; // H = HELP the town, X = HARM it
 
-export const PROFESSIONS = [
-  "FARMER",
-  "DOCTOR",
-  "BUILDER",
-  "BANKER",
-  "TEACHER",
-  "MAYOR",
-  "GROCER",
-  "MECHANIC",
-] as const;
-export type Profession = (typeof PROFESSIONS)[number];
+export const AGENDAS = ["pillar", "developer", "gossip", "chameleon", "martyr", "fixer", "snake", "neighbour"] as const;
+export type Agenda = (typeof AGENDAS)[number];
 
-export type Phase =
-  | "LOBBY"
-  | "NEGOTIATE"
-  | "VOTE"
-  | "RECAP"
-  | "PLANT"
-  | "DISCUSS"
-  | "NOMINATE"
-  | "LOCKUP"
-  | "REVEAL";
+export type Phase = "LOBBY" | "AGENDA" | "TALK" | "VOTE" | "RESULT" | "GOSSIP" | "ACCUSE" | "VERDICT" | "END";
 
-export type Category = "BAD" | "GOOD" | "MORAL";
-
-export interface Effect {
-  /** Coin change for the primary target. */
-  p: number;
-  /** Coin change for the secondary target. */
-  s: number;
-}
-
-export interface Template {
-  id: string;
-  name: string;
-  help: Effect;
-  harm: Effect;
-}
+export type CardIcon =
+  | "flame" | "wave" | "bolt" | "coins" | "cross" | "bridge" | "burst"
+  | "mask" | "food" | "cloud" | "warning" | "build" | "book";
 
 export interface EventCard {
   id: string;
   title: string;
-  category: Category;
-  primaryProfession: Profession | null;
+  icon: CardIcon;
   premise: string;
   helpLabel: string;
   harmLabel: string;
   helpResult: string;
   harmResult: string;
-  template: string;
-  tags: string[];
-  contentVersion: number;
 }
 
 export interface Player {
@@ -64,10 +30,10 @@ export interface Player {
   isHost: boolean;
   ready: boolean;
   connected: boolean;
-  profession: Profession | null;
-  wallet: number;
-  /** The round number this player sits out in the stocks, if any. */
-  lockedForRound: number | null;
+  agenda: Agenda | null;
+  coins: number;
+  /** The round this player sits out after being accused. */
+  sitOutRound: number | null;
 }
 
 export interface Bribe {
@@ -75,56 +41,27 @@ export interface Bribe {
   round: number;
   from: string;
   to: string;
-  amount: number;
   side: Side;
   status: "pending" | "accepted" | "declined" | "expired";
 }
 
-export interface Loan {
-  id: string;
-  seq: number;
-  round: number;
-  lender: string;
-  borrower: string;
-  amount: number;
-  status: "pending" | "accepted" | "declined" | "expired";
-  repaid: number | null;
-  owed: number | null;
-}
-
-export interface Settlement {
-  stake: number;
-  payout: number;
-  skim: number;
-  dividend: number;
-  card: number;
-  /** Card penalty that could not be taken because the wallet ran dry. */
-  shortfall: number;
-  net: number;
-}
-
 export interface RoundResult {
-  winner: Side | null;
+  winner: Side | null; // null = tie or nobody voted
   help: number;
   harm: number;
-  tieBroken: boolean;
-  unanimous: boolean;
-  prosperityBefore: number;
-  prosperityAfter: number;
-  potIn: number;
-  potOut: number;
-  settlements: Record<string, Settlement>;
+  /** Every vote, shuffled, so the reveal can flip them one at a time anonymously. */
+  flips: Side[];
+  townBefore: number;
+  townAfter: number;
+  gains: Record<string, { skim: number; dividend: number }>;
 }
 
 export interface RoundRecord {
   round: number;
   cardId: string;
-  primary: string;
-  secondary: string;
-  lockedUp: string | null;
+  sittingOut: string | null;
   eligible: string[];
   votes: Record<string, Side>;
-  /** Players whose vote was locked by an accepted bribe. */
   bribeLocked: Record<string, Side>;
   result: RoundResult | null;
 }
@@ -134,48 +71,27 @@ export interface Rumour {
   count: number;
 }
 
-export interface Plant {
-  planter: string;
-  target: string;
-  count: number;
-  recipient: string | null;
-}
-
-export interface Meeting {
+export interface Accusation {
   afterRound: number;
-  plants: Plant[];
-  trueRumours: Record<string, Rumour>;
   rumours: Record<string, Rumour>;
+  /** HARM counts at the moment of the accusation (used for the Gossip agenda). */
+  harmAtAccusation: Record<string, number>;
   nominations: Record<string, string | null>;
   tally: Record<string, number>;
-  lockedUp: string | null;
-  audit: { caught: boolean; harmCount: number; amount: number } | null;
+  accused: string | null;
 }
 
-export type Account = string; // a player id, or one of the special accounts below
-export const MINT = "@mint";
-export const BURN = "@burn";
-export const POT = "@pot";
+export interface Score {
+  coins: number;
+  bonus: number;
+  total: number;
+  bonusReason: string;
+}
 
-export interface LedgerEntry {
-  seq: number;
-  round: number;
-  kind:
-    | "start"
-    | "stake"
-    | "payout"
-    | "skim"
-    | "dividend"
-    | "card"
-    | "bribe"
-    | "loan"
-    | "repay"
-    | "plant"
-    | "fine"
-    | "compensation";
-  from: Account;
-  to: Account;
-  amount: number;
+export interface Outcome {
+  collapsed: boolean;
+  winners: string[];
+  scores: Record<string, Score>;
 }
 
 export interface ChatLine {
@@ -185,22 +101,15 @@ export interface ChatLine {
   at: number;
 }
 
-export interface Outcome {
-  collapsed: boolean;
-  winners: string[];
-  reason: "rounds" | "collapse" | "broke";
-}
-
 export interface GameState {
-  v: 1;
+  v: 2;
   code: string;
   createdAt: number;
   gameNo: number;
   phase: Phase;
   deadline: number | null;
   round: number;
-  prosperity: number;
-  pot: number;
+  town: number;
   settings: Settings;
   seed: number;
   rng: number;
@@ -209,17 +118,12 @@ export interface GameState {
   deckPos: number;
   rounds: RoundRecord[];
   bribes: Bribe[];
-  loans: Loan[];
-  meeting: Meeting | null;
-  ledger: LedgerEntry[];
+  accusation: Accusation | null;
   minted: number;
-  burned: number;
   outcome: Outcome | null;
-  /** Players who have pressed "ready / move on" in the current phase. */
   readyNext: string[];
   chat: ChatLine[];
   seq: number;
-  /** Recently processed command ids per player, for idempotency. */
   seen: Record<string, string[]>;
 }
 
@@ -227,13 +131,10 @@ export type Command =
   | { type: "READY"; ready: boolean }
   | { type: "LEAVE" }
   | { type: "START" }
-  | { type: "OFFER_BRIBE"; to: string; amount: number; side: Side }
+  | { type: "OFFER_BRIBE"; to: string; side: Side }
   | { type: "RESPOND_BRIBE"; id: string; accept: boolean }
-  | { type: "OFFER_LOAN"; to: string; amount: number }
-  | { type: "RESPOND_LOAN"; id: string; accept: boolean }
   | { type: "VOTE"; side: Side }
   | { type: "READY_NEXT" }
-  | { type: "PLANT"; target: string; count: number }
   | { type: "NOMINATE"; target: string | null }
   | { type: "CHAT"; text: string }
   | { type: "REMATCH" };
