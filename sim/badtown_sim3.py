@@ -19,7 +19,7 @@ NIGHTS = 6
 TRUSTY_AFTER = 3
 
 
-def play(split, length, p_dig, q_search, rat_acc=0.5, rat_cover=0.25, guard_pick_rat=None, mole_rate=0.75, mole_dig=0.75, rats=1, rng=random):
+def play(split, length, p_dig, q_search, rat_acc=0.5, rat_cover=0.25, guard_pick_rat=None, mole_rate=0.75, mole_dig=0.75, rats=1, vote_acc=None, rng=random):
     g, i = split
     inmates = list(range(i))
     rat_ids = set(rng.sample(inmates, rats))
@@ -32,11 +32,22 @@ def play(split, length, p_dig, q_search, rat_acc=0.5, rat_cover=0.25, guard_pick
     caught_total = 0
     rat_promoted = False
     gains = []
+    exposed = set()
     for night in range(1, NIGHTS + 1):
+        if vote_acc is not None and night == 3:
+            # The cell-block vote: out the Rat, or send an innocent to the hole.
+            acc = vote_acc if vote_acc >= 0 else min(0.7, 1.4 / len(inmates))
+            live = [x for x in inmates if x in rat_ids]
+            if live and rng.random() < acc:
+                exposed.add(live[0])
+            else:
+                honest = [x for x in inmates if x not in rat_ids]
+                if honest:
+                    hole.add(rng.choice(honest))
         if night == TRUSTY_AFTER + 1 and len(inmates) >= 3:
             # Guards try to promote the Rat. Chance they find them:
             pr = guard_pick_rat if guard_pick_rat is not None else min(0.8, 1.6 / len(inmates))
-            live_rats = [x for x in inmates if x in rat_ids]
+            live_rats = [x for x in inmates if x in rat_ids and x not in exposed]
             if live_rats and rng.random() < pr:
                 pick = live_rats[0]
                 rat_promoted = True
@@ -54,6 +65,8 @@ def play(split, length, p_dig, q_search, rat_acc=0.5, rat_cover=0.25, guard_pick
         for x in inmates:
             if x in hole:
                 acts[x] = "HOLE"
+            elif x in rat_ids and x in exposed:
+                acts[x] = "SLEEP"
             elif x in rat_ids:
                 r = rng.random()
                 acts[x] = "DIG" if r < rat_cover else "NAME"
